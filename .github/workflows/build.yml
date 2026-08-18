@@ -18,9 +18,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Inject DeepSeek key (from GitHub Secrets)
+        env:
+          DS_KEY: ${{ secrets.DEEPSEEK_KEY }}
         run: |
-          sed -i "s/REPLACE_DEEPSEEK_KEY/${{ secrets.DEEPSEEK_KEY }}/g" Tweak.x
-          grep -c "sk-" Tweak.x || echo "WARN: no key injected"
+          python3 -c "import io;p='Tweak.x';s=io.open(p,encoding='utf-8').read();s=s.replace('REPLACE_DEEPSEEK_KEY',__import__('os').environ['DS_KEY']);io.open(p,'w',encoding='utf-8').write(s);print('key injected:', 'sk-' in s)"
 
       - name: Install theos (roothide branch)
         run: |
