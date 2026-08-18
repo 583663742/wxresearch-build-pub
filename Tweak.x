@@ -1648,7 +1648,7 @@ static void WXChatVCLoad(id self, SEL _cmd) {
     ((void(*)(struct objc_super *, SEL))objc_msgSendSuper)(&sup, sel_registerName("viewDidLoad"));
 }
 
-static void WXEnsureChatVCLoaded(void) {
+static void __attribute__((unused)) WXEnsureChatVCLoaded(void) {
     if (WXChatVCClass) return;
     @autoreleasepool {
         WXChatVCClass = objc_allocateClassPair([UIViewController class], "WXChatDetailVC", 0);
@@ -1667,7 +1667,7 @@ static void WXStatsVCLoad(id self, SEL _cmd) {
     ((void(*)(struct objc_super *, SEL))objc_msgSendSuper)(&sup, sel_registerName("viewDidLoad"));
 }
 
-static void WXEnsureStatsVCLoaded(void) {
+static void __attribute__((unused)) WXEnsureStatsVCLoaded(void) {
     if (WXStatsVCClass) return;
     @autoreleasepool {
         WXStatsVCClass = objc_allocateClassPair([UIViewController class], "WXStatsPageVC", 0);
@@ -1686,7 +1686,7 @@ static void WXAIVCLoad(id self, SEL _cmd) {
     ((void(*)(struct objc_super *, SEL))objc_msgSendSuper)(&sup, sel_registerName("viewDidLoad"));
 }
 
-static void WXEnsureAIVCLoaded(void) {
+static void __attribute__((unused)) WXEnsureAIVCLoaded(void) {
     if (WXAIVCClass) return;
     @autoreleasepool {
         WXAIVCClass = objc_allocateClassPair([UIViewController class], "WXAIResearchVC", 0);
