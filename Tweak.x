@@ -1,4 +1,4 @@
-﻿// 微信聊天研究 1.2.0 — pkc 式微信内插件（纯原生 UIKit 版）
+// 微信聊天研究 1.2.0 — pkc 式微信内插件（纯原生 UIKit 版）
 // 注入微信进程(com.tencent.xin)，右下角悬浮球 → 全屏研究页面
 // 会话列表 / 对话气泡 / 搜索 / 按天统计 / AI研究模式(选人+时间段→DeepSeek分析讨论)
 // 实时只读微信沙盒 DB，AI 调用走 DeepSeek API(用户自配 key)
@@ -80,6 +80,10 @@ static long long WXRangeEnd = 0;
 static NSString *WXAIExtractContent(NSString *html);
 static NSString *WXCurrentChatUser(void);
 static UIViewController *WXTopVC(void);
+static void WXSessionsVCReload(void *ctx);
+static void WXChatReloadUI(void *ctx);
+static void WXStatsReload(void *ctx);
+static void WXAIRefreshUI(void *ctx);
 
 // ============ 文件日志 ============
 static void WXLog(NSString *fmt, ...) {
