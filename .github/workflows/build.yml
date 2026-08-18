@@ -1,0 +1,57 @@
+# wxresearch 1.1.0 macOS 原生构建（pkc 式微信聊天研究插件）
+# 触发：push 或手动 workflow_dispatch
+# 安全：仓库只存占位符版 Tweak.x，构建时用 GitHub Secrets 注入真实 key
+name: Build wxresearch
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    env:
+      THEOS: ${{ github.workspace }}/theos
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Inject DeepSeek key (from GitHub Secrets)
+        run: |
+          sed -i "s/REPLACE_DEEPSEEK_KEY/${{ secrets.DEEPSEEK_KEY }}/g" Tweak.x
+          grep -c "sk-" Tweak.x || echo "WARN: no key injected"
+
+      - name: Install theos (roothide branch)
+        run: |
+          git clone --recursive --depth 1 https://github.com/roothide/theos.git "$THEOS"
+
+      - name: Install iOS 16.5 SDK
+        run: |
+          mkdir -p "$THEOS/sdks"
+          tar -xJf sdk/iPhoneOS16.5.sdk.tar.xz -C "$THEOS/sdks"
+
+      - name: Install ldid (needed for arm64e signing)
+        run: |
+          brew install ldid || brew install --build-from-source ldid || (mkdir -p "$THEOS/bin" && curl -L -o "$THEOS/bin/ldid" https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_macosx_arm64 && chmod +x "$THEOS/bin/ldid" && echo "$THEOS/bin" >> $GITHUB_PATH)
+
+      - name: Build package
+        run: |
+          export THEOS_PACKAGE_SCHEME=roothide
+          make clean
+          make package FINALPACKAGE=1
+
+      - name: List artifacts
+        run: |
+          ls -la packages/ || true
+          find . -name "*.dylib" -not -path "./layout/*" | head -5
+
+      - name: Upload deb + dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: wxresearch-build
+          path: |
+            packages/*.deb
+            .theos/obj/debug/arm64e/*.dylib
+            .theos/obj/arm64e/*.dylib
+          if-no-files-found: warn

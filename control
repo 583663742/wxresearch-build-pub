@@ -1,0 +1,9 @@
+Package: cn.wxresearch.chat
+Name: 微信聊天研究
+Author: Hermes
+Description: pkc 式微信聊天研究插件：微信内悬浮球入口 → 选人或群 → 选时间段 → DeepSeek AI 分析聊天记录并讨论（会话列表/对话气泡/搜索/按天统计）
+Depends: mobilesubstrate
+Maintainer: Hermes
+Section: roothide插件
+Architecture: iphoneos-arm64e
+Version: 1.1.0
