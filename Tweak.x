@@ -894,6 +894,12 @@ static NSString *WXPageHTML(void) {
     ".stat-line .sl-cnt{color:#3498db;font-weight:600}"
     ".stat-line .sl-mine{color:#999;font-size:13px;margin-left:8px}"
     ".stat-total{display:flex;justify-content:space-between;padding:14px 20px;background:#fbfbfb;font-size:15px;font-weight:600}"
+    ".stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:14px 16px}"
+    ".stat-card{background:#fff;border:1px solid #eee;border-radius:12px;padding:12px 10px;text-align:center}"
+    ".stat-card .sc-ico{font-size:24px;line-height:1.3}"
+    ".stat-card .sc-name{color:#666;font-size:12px;margin-top:2px}"
+    ".stat-card .sc-cnt{color:#3498db;font-weight:700;font-size:18px;margin-top:2px}"
+    ".stat-card .sc-mine{color:#999;font-size:11px;margin-top:1px}"
     ".modal-actions{display:flex;border-top:1px solid #eee}"
     ".modal-actions button{flex:1;padding:14px 0;border:none;background:#fff;font-size:15px;color:#111;cursor:pointer}"
     ".modal-actions button+button{border-left:1px solid #eee}"
@@ -939,7 +945,7 @@ static NSString *WXPageHTML(void) {
     "function fmtDay(ts){var d=new Date(ts*1000);var now=new Date();var yest=new Date(now.getTime()-86400000);"
     "if(d.toDateString()===now.toDateString())return'今天';if(d.toDateString()===yest.toDateString())return'昨天';"
     "return d.getFullYear()+'年'+(d.getMonth()+1)+'月'+d.getDate()+'日';}"
-    "var TYPE_LABEL={1:'',3:'[图片]',34:'[语音]',43:'[视频]',47:'[表情]',49:'[链接]',50:'[语音通话]',10000:'[系统消息]'};"
+    "var TYPE_LABEL={1:'',3:'[图片]',34:'[语音]',43:'[视频]',47:'[表情]',49:'[链接]',42:'[名片]',48:'[位置]',50:'[语音通话]',62:'[视频号]',10000:'[系统消息]',10002:'[引用]',318767153:'[小程序]',436207665:'[红包]',436207632:'[红包]',419430449:'[转账]'};"
     "function fmtMsg(t,msg){if(t===1||t===10000){var s=String(msg);s=s.replace(/^wxid_[^:\\r\\n]+[\\r\\n]+/,'');return esc(s);}if(t===49){"
     "var m=msg.match(/<title>([^<]*)<\\/title>/);return'[链接] '+(m?esc(m[1]):'分享');}"
     "return TYPE_LABEL[t]||('[消息'+t+']');}"
@@ -1068,7 +1074,7 @@ static NSString *WXPageHTML(void) {
     "document.getElementById('content').innerHTML='<div class=loading><span class=spin></span>统计中…</div>';"
     "post({action:'stats_detail',p1:state.db,p2:state.table,p3:String(Math.floor(start)),p4:Math.floor(end)}).then(function(rows){renderStats(rows,start,end);});}"
     "function renderStats(rows,start,end){"
-    "var TYPE_N={1:'文本',3:'图片',34:'语音',43:'视频',47:'表情',49:'链接',50:'通话',10000:'系统'};"
+    "var TYPE_N={1:['文本','💬'],3:['图片','🖼️'],436207665:['红包','🧧'],436207632:['红包','🧧'],419430449:['转账','💸'],34:['语音','🎤'],43:['视频','🎬'],47:['表情','😀'],49:['链接','🔗'],42:['名片','👤'],48:['位置','📍'],318767153:['小程序','📱'],50:['通话','📞'],62:['视频号','🎵'],10000:['系统','⚙️'],10002:['引用','💬']};"
     "var total=rows.length?rows[0]:null;var totalCnt=total?total.cnt:0;var mine=total?total.mine:0;var theirs=total?total.theirs:0;"
     "function fmtRange(){var s=new Date(start*1000),e=new Date(end*1000);"
     "function md(d){return(d.getMonth()+1)+'/'+d.getDate();}"
@@ -1077,8 +1083,10 @@ static NSString *WXPageHTML(void) {
     "var mm=statsReady();var sh=document.getElementById('statsSheet');"
     "sh.innerHTML='<div class=modal-card><div class=modal-head><h3>消息统计</h3><div class=sub>'+fmtRange()+'</div></div>';"
     "var card=sh.querySelector('.modal-card');"
-    "for(var i=1;i<rows.length;i++){var r=rows[i];var nm=TYPE_N[r.Type]||('类型'+r.Type);"
-    "card.innerHTML+='<div class=stat-line><span class=sl-name>'+nm+'</span><span><span class=sl-cnt>'+r.cnt+'</span><span class=sl-mine>我'+r.mine+' / 对方'+r.theirs+'</span></span></div>';}"
+    "card.innerHTML+='<div class=stat-grid>';"
+    "for(var i=1;i<rows.length;i++){var r=rows[i];var def=TYPE_N[r.Type]||['类型'+r.Type,'❓'];"
+    "card.innerHTML+='<div class=stat-card><div class=sc-ico>'+def[1]+'</div><div class=sc-name>'+def[0]+'</div>'+'<div class=sc-cnt>'+r.cnt+'</div><div class=sc-mine>我'+r.mine+' / 对方'+r.theirs+'</div></div>';}"
+    "card.innerHTML+='</div>';"
     "card.innerHTML+='<div class=stat-total><span>总计 '+totalCnt+' 条</span><span>我 '+mine+' / 对方 '+theirs+'</span></div>';"
     "card.innerHTML+='<div class=modal-actions>'+'<button onclick=closeStats()>关闭</button>'"
     "+'<button onclick=copyStats('+start+','+end+')>复制</button>'"
@@ -1087,7 +1095,7 @@ static NSString *WXPageHTML(void) {
     "mm.className='mask show';}"
     "function copyStats(start,end){"
     "post({action:'stats_detail',p1:state.db,p2:state.table,p3:String(Math.floor(start)),p4:Math.floor(end)}).then(function(rows){"
-    "var TYPE_N={1:'文本',3:'图片',34:'语音',43:'视频',47:'表情',49:'链接',50:'通话',10000:'系统'};"
+    "var TYPE_N={1:'文本',3:'图片',436207665:'红包',436207632:'红包',419430449:'转账',34:'语音',43:'视频',47:'表情',49:'链接',42:'名片',48:'位置',318767153:'小程序',50:'通话',62:'视频号',10000:'系统',10002:'引用'};"
     "var total=rows.length?rows[0]:null;var txt='消息统计\\n';"
     "for(var i=1;i<rows.length;i++){var r=rows[i];txt+=TYPE_N[r.Type]+': '+r.cnt+' (我'+r.mine+' 对方'+r.theirs+')\\n';}"
     "txt+='总计: '+total.cnt+' (我'+total.mine+' 对方'+total.theirs+')';"
@@ -1703,13 +1711,13 @@ static void __attribute__((unused)) WXEnsureAIVCLoaded(void) {
 %ctor {
     // 🔴 第 1 行必须是无 ObjC 依赖的纯 C 文件写入
     // （如果 %ctor 之后崩了也能看到 ctor_enter；连这行都没 = dyld 在 bind/rebase 阶段就崩了）
-    WX_C_ctor_footprint("ctor_enter_v1.1.1");
+    WX_C_ctor_footprint("ctor_enter_v1.1.2");
     // ============ 任何 objc_getClass / objc_allocateClassPair 绝对不能放在这之前！========
 
-    NSLog(BJCStr("[wxresearch] dylib loaded (v1.1.1), installing ball"));
+    NSLog(BJCStr("[wxresearch] dylib loaded (v1.1.2), installing ball"));
     WX_C_ctor_footprint("ctor_nslog_ok");
 
-    WXLog(BJCStr("dylib loaded (v1.1.1)"));
+    WXLog(BJCStr("dylib loaded (v1.1.2)"));
     WX_C_ctor_footprint("ctor_wxlog_ok");
 
     dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
