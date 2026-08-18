@@ -94,7 +94,7 @@ static void WX_C_ctor_footprint(const char *tag) {
     if (fd >= 0) {
         char buf[128];
         struct timeval tv; gettimeofday(&tv, NULL);
-        int n = snprintf(buf, sizeof(buf), "[%ld.%06ld] %s pid=%d\n",
+        int n = snprintf(buf, sizeof(buf), "[%ld.%06d] %s pid=%d\n",
                          (long)tv.tv_sec, (int)tv.tv_usec, tag, (int)getpid());
         if (n > 0) write(fd, buf, (size_t)n);
         close(fd);
