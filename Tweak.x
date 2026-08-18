@@ -1219,9 +1219,9 @@ static void WXOnScriptMessage(id self, SEL _cmd, WKUserContentController *uc, WK
                 }
             }
             if (rStart > 0 && rEnd > rStart) {
-                result = WXFetchMessagesRangeDB(db, table, rStart, rEnd, offset, (int)p4);
+                result = WXFetchMessagesRangeDB(p1, p2, rStart, rEnd, offset, (int)p4);
             } else {
-                result = WXFetchMessages(db, table, offset, (int)p4);
+                result = WXFetchMessages(p1, p2, offset, (int)p4);
             }
         } else if ([action isEqualToString:BJCStr("search")]) {
             result = WXSearchMessages(p1, p2, p3, (int)p4);
