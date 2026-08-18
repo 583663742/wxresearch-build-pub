@@ -6,4 +6,4 @@ Depends: mobilesubstrate
 Maintainer: Hermes
 Section: roothide插件
 Architecture: iphoneos-arm64e
-Version: 1.1.0
+Version: 1.1.1
