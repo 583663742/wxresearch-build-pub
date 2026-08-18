@@ -174,7 +174,7 @@ static NSString *WXCleanSurrogates(NSString *s) {
     return ms;
 }
 
-static id WXJSONSafe(id obj) {
+static id __attribute__((unused)) WXJSONSafe(id obj) {
     if ([obj isKindOfClass:[NSString class]]) return WXCleanSurrogates(obj);
     if ([obj isKindOfClass:[NSData class]]) {
         return [NSString stringWithFormat:BJCStr("[二进制数据 %lu字节]"), (unsigned long)[(NSData *)obj length]];
@@ -1621,7 +1621,7 @@ static void WXOpenStatsSheet(void) {
 }
 
 // AI 时间范围选择（直接在 AI 页面内用按钮，这里也提供 sheet）
-static void WXOpenAIStartSheet(void) {
+static void __attribute__((unused)) WXOpenAIStartSheet(void) {
     WXCurSheetCtx = WXSheetCtxAI;
     WXSheetItem items[] = {
         {"全部记录", 500, NO, NO},
@@ -2662,7 +2662,7 @@ static UITableViewCell *WXStatsVCCell(id self, SEL _cmd, UITableView *tv, NSInde
 }
 
 // 按天分布柱状图
-static void WXStatsVCDraw(id self, SEL _cmd, CGRect r) {
+static void __attribute__((unused)) WXStatsVCDraw(id self, SEL _cmd, CGRect r) {
     @autoreleasepool {
         // 我们通过 viewDidLayoutSubviews 里画
     }
