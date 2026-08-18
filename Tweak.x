@@ -416,6 +416,24 @@ static NSArray *WXSearchMessages(NSString *db, NSString *table, NSString *kw, in
     return WXQuery(db, sql, 0);
 }
 
+// ============ 时间段 + 分页拉消息（聊天记录时间过滤） ============
+// 倒序取最新（与 WXFetchMessages 一致），offset 从最新往前翻
+static NSArray *WXFetchMessagesRangeDB(NSString *db, NSString *table, long long startTs, long long endTs, int offset, int limit) {
+    NSString *sql = [NSString stringWithFormat:BJCStr(
+        "SELECT MesLocalID, CreateTime, Type, Message, Des FROM %@ "
+        "WHERE CreateTime>=%lld AND CreateTime<=%lld ORDER BY MesLocalID DESC LIMIT %d OFFSET %d"),
+        table, startTs, endTs, limit, offset];
+    NSArray *rows = WXQuery(db, sql, 0);
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSDictionary *r in [rows reverseObjectEnumerator]) {
+        NSMutableDictionary *m = [NSMutableDictionary dictionaryWithDictionary:r];
+        long long desVal = [m[BJCStr("Des")] longLongValue];
+        m[BJCStr("isMe")] = @(desVal == 0);
+        [out addObject:m];
+    }
+    return out;
+}
+
 // ============ 按时间段提取消息（正序，用于 AI 研究） ============
 static NSArray *WXFetchMessagesRange(NSString *db, NSString *table, long long startTs, long long endTs, int limit) {
     NSString *sql;
@@ -841,7 +859,8 @@ static NSString *WXPageHTML(void) {
     "<h1 id='title'>聊天研究</h1>"
     "<button id='searchBtn' onclick='toggleSearch()' style='visibility:hidden'>搜索</button>"
     "<button id='statsBtn' onclick='openStatsMenu()' style='visibility:hidden;color:#576b95'>📊统计</button>"
-    "<button id='aiBtn' onclick='openAI()' style='visibility:hidden;color:#576b95'>AI研究</button></div>"
+    "<button id='aiBtn' onclick='openAI()' style='visibility:hidden;color:#576b95'>AI研究</button>"
+    "<button id='timeBtn' onclick='openTimeMenu()' style='visibility:hidden;color:#e64340;font-size:12px'>全部</button></div>"
     "<div id='statsMask' class='mask'><div id='statsSheet' class='sheet'></div></div>"
     "<div id='searchBar'><input id='kw' placeholder='搜索聊天记录…' oninput='onSearch(this.value)'></div>"
     "<div id='sessSearch'><input id='skw' placeholder='搜备注/名字/微信号' oninput='onSessSearch(this.value)'></div>"
@@ -894,18 +913,21 @@ static NSString *WXPageHTML(void) {
     "+'<div class=sess-last>'+esc(s.userName||'')+'</div></div>'+'<div class=sess-right><div class=sess-time>'+fmtTime(s.lastTime)+'</div>'"
     "+'</div></div>';}"
     "document.getElementById('content').innerHTML=html||'<div class=empty>没有找到相关会话</div>';});}"
-    "function openSess(i){var s=window._sessList[i];state.view='chat';state.table=s.table;state.db=s.db;state.name=s.name;state.offset=0;state.all=false;state.kw='';"
+    "function openSess(i){var s=window._sessList[i];state.view='chat';state.table=s.table;state.db=s.db;state.name=s.name;state.offset=0;state.all=false;state.kw='';state.range=[0,0];"
     "document.getElementById('title').textContent=s.name;"
     "document.getElementById('backBtn').style.visibility='visible';"
     "document.getElementById('searchBtn').style.visibility='visible';"
     "document.getElementById('statsBtn').style.visibility='visible';"
     "document.getElementById('aiBtn').style.visibility='visible';"
+    "document.getElementById('timeBtn').style.visibility='visible';"
+    "document.getElementById('timeBtn').textContent='全部';"
     "document.getElementById('searchBar').style.display='none';"
     "document.getElementById('sessSearch').style.display='none';"
     "document.getElementById('kw').value='';"
     "document.getElementById('content').innerHTML='';loadMore();}"
     "function loadMore(){if(state.view!=='chat'||state.loading||state.all)return;state.loading=true;"
-    "post({action:'messages',p1:state.db,p2:state.table,p3:state.offset,p4:50}).then(function(batch){"
+    "var p3=String(state.offset);if(state.range[1]>state.range[0])p3=state.offset+'|'+state.range[0]+'|'+state.range[1];"
+    "post({action:'messages',p1:state.db,p2:state.table,p3:p3,p4:50}).then(function(batch){"
     "state.loading=false;if(!batch.length){state.all=true;}"
     "state.offset+=batch.length;var c=document.getElementById('content');"
     "var html='';var lastDay='';for(var i=0;i<batch.length;i++){var m=batch[i];"
@@ -925,15 +947,47 @@ static NSString *WXPageHTML(void) {
     "document.getElementById('content').innerHTML=html||'<div class=empty>没有找到相关消息</div>';});}"
     "function goBack(){if(state.view==='chat'){loadSessions();}else if(state.view==='ai'){showChat();}else{post({action:'close'});}}"
     "/* ============ pkc 式消息统计 ============ */"
-    "function closeStats(){document.getElementById('statsMask').className='mask';}"
+    "function closeStats(){var m=document.getElementById('statsMask');if(m)m.className='mask';}"
+    "function statsReady(){var m=document.getElementById('statsMask');if(m)return m;var d=document.createElement('div');d.id='statsMask';d.className='mask';d.innerHTML='<div id=statsSheet class=sheet></div>';document.body.appendChild(d);return d;}"
+    "function openTimeMenu(){"
+    "var html='<div class=sheet-title>⏱ 查看时间段</div>';"
+    "var items=[['全部','all'],['今天','today'],['昨天','yest'],['近3天','3'],['近7天','7'],['近1月','30'],['自定义日期','custom']];"
+    "for(var i=0;i<items.length;i++){"
+    "html+='<div class=sheet-item onclick=timePick(\\''+items[i][1]+'\\')>'+items[i][0]+'<span class=si-arrow>›</span></div>';}"
+    "html+='<div class=sheet-cancel onclick=closeStats()>取消</div>';"
+    "var mm=statsReady();document.getElementById('statsSheet').innerHTML=html;mm.className='mask show';}"
+    "function timePick(kind){"
+    "var now=new Date();var start=0,end=0;"
+    "if(kind==='today'){var d=new Date(now);d.setHours(0,0,0,0);start=d.getTime()/1000;end=now.getTime()/1000;}"
+    "else if(kind==='yest'){var d=new Date(now);d.setHours(0,0,0,0);var d2=new Date(d.getTime()-86400000);start=d2.getTime()/1000;end=d.getTime()/1000;}"
+    "else if(kind==='3'||kind==='7'||kind==='30'){end=now.getTime()/1000;start=end-parseInt(kind)*86400;}"
+    "else if(kind==='custom'){openTimeCustom();return;}"
+    "setRange(start,end,kind);}"
+    "function openTimeCustom(){"
+    "var today=new Date();var t=today.getFullYear()+'-'+((today.getMonth()+1)<10?'0':'')+(today.getMonth()+1)+'-'+((today.getDate()<10)?'0':'')+today.getDate();"
+    "var html='<div class=sheet-title>自定义日期</div>'"
+    "+\"<div class=date-row><input type=date id=dStart max='\"+t+\"' value='\"+t+\"'><input type=date id=dEnd max='\"+t+\"' value='\"+t+\"'></div>\""
+    "+'<div class=sheet-cancel onclick=doTimeCustom() style=color:#07c160;font-weight:600>确定</div>'"
+    "+'<div class=sheet-cancel onclick=closeStats()>取消</div>';"
+    "var mm2=statsReady();document.getElementById('statsSheet').innerHTML=html;mm2.className='mask show';}"
+    "function doTimeCustom(){"
+    "var s=document.getElementById('dStart').value;var e=document.getElementById('dEnd').value;"
+    "if(!s||!e||e<s){alert('日期无效');return;}"
+    "var sT=new Date(s+'T00:00:00').getTime()/1000;"
+    "var eT=new Date(e+'T23:59:59').getTime()/1000;"
+    "setRange(sT,eT,'custom');}"
+    "function setRange(start,end,label){"
+    "closeStats();state.range=[start,end];state.offset=0;state.all=false;"
+    "var names={all:'全部',today:'今天',yest:'昨天','3':'近3天','7':'近7天','30':'近1月',custom:'自定义'};"
+    "document.getElementById('timeBtn').textContent=names[label]||'自定义';"
+    "document.getElementById('content').innerHTML='';loadMore();}"
     "function openStatsMenu(){"
     "var html='<div class=sheet-title>📊 消息统计</div>';"
     "var items=[['今天','today'],['昨天','yest'],['近1周','7'],['近1月','30'],['近1年','365'],['自定义范围','custom'],['群消息排名','group']];"
     "for(var i=0;i<items.length;i++){"
     "html+='<div class=sheet-item onclick=statsPick(\\''+items[i][1]+'\\')>'+items[i][0]+'<span class=si-arrow>›</span></div>';}"
     "html+='<div class=sheet-cancel onclick=closeStats()>取消</div>';"
-    "document.getElementById('statsSheet').innerHTML=html;"
-    "document.getElementById('statsMask').className='mask show';}"
+    "var mm=statsReady();document.getElementById('statsSheet').innerHTML=html;mm.className='mask show';}"
     "function statsPick(kind){"
     "var now=new Date();var start,end;"
     "if(kind==='today'){var d=new Date(now);d.setHours(0,0,0,0);start=d.getTime()/1000;end=now.getTime()/1000;}"
@@ -948,7 +1002,7 @@ static NSString *WXPageHTML(void) {
     "+\"<div class=date-row><input type=date id=dStart max='\"+t+\"' value='\"+t+\"'><input type=date id=dEnd max='\"+t+\"' value='\"+t+\"'></div>\""
     "+'<div class=sheet-cancel onclick=doCustomRange() style=color:#07c160;font-weight:600>确定</div>'"
     "+'<div class=sheet-cancel onclick=closeStats()>取消</div>';"
-    "document.getElementById('statsSheet').innerHTML=html;}"
+    "var mm2=statsReady();document.getElementById('statsSheet').innerHTML=html;mm2.className='mask show';}"
     "function doCustomRange(){"
     "var s=document.getElementById('dStart').value;var e=document.getElementById('dEnd').value;"
     "if(!s||!e||e<s){alert('日期无效');return;}"
@@ -1153,7 +1207,22 @@ static void WXOnScriptMessage(id self, SEL _cmd, WKUserContentController *uc, WK
             }
             result = @[d];
         } else if ([action isEqualToString:BJCStr("messages")]) {
-            result = WXFetchMessages(p1, p2, (int)p3.intValue, (int)p4);
+            // p1=db p2=table p3=offset p4=limit；时间段过滤：p3 传 "offset|startTs|endTs"
+            int offset = (int)p3.intValue;
+            long long rStart = 0, rEnd = 0;
+            if ([p3 rangeOfString:BJCStr("|")].location != NSNotFound) {
+                NSArray *pp = [p3 componentsSeparatedByString:BJCStr("|")];
+                offset = (int)[pp[0] intValue];
+                if ([pp count] >= 3) {
+                    rStart = [pp[1] longLongValue];
+                    rEnd = [pp[2] longLongValue];
+                }
+            }
+            if (rStart > 0 && rEnd > rStart) {
+                result = WXFetchMessagesRangeDB(db, table, rStart, rEnd, offset, (int)p4);
+            } else {
+                result = WXFetchMessages(db, table, offset, (int)p4);
+            }
         } else if ([action isEqualToString:BJCStr("search")]) {
             result = WXSearchMessages(p1, p2, p3, (int)p4);
         } else if ([action isEqualToString:BJCStr("stats")]) {
