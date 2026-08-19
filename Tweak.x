@@ -1,4 +1,4 @@
-// 微信聊天研究 1.2.0 — pkc 式微信内插件（纯原生 UIKit 版）
+// 微信聊天研究 1.2.1 — pkc 式微信内插件（纯原生 UIKit 版）
 // 注入微信进程(com.tencent.xin)，长按+号 → pkc菜单 → 统计/AI分析/聊天记录
 // 原生 UIKit，无悬浮球，零读库直到点击
 // AI 调用走用户自配 API（NSUserDefaults 存储 URL/Key/Model）
@@ -1353,7 +1353,7 @@ static UITableViewCell *WXSettingsVCCell(id self, SEL _cmd, UITableView *tv, NSI
         } else {
             UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:BJCStr("setCell")];
             [[cell textLabel] setText:BJCStr("版本")];
-            [[cell detailTextLabel] setText:BJCStr("v1.2.0")];
+            [[cell detailTextLabel] setText:BJCStr("v1.2.1")];
             [cell setSelectionStyle:UITableViewCellSelectionStyleNone];
             return cell;
         }
@@ -1383,31 +1383,32 @@ static IMP WXOrigPluginsCellForRow = NULL;
 static IMP WXOrigPluginsSelectRow = NULL;
 static IMP WXOrigPluginsTitleHeader = NULL;
 
-static NSInteger WXHookedPluginsNumSections(id self, SEL _cmd, UITableView *tv) {
-    NSInteger orig = WXOrigPluginsNumSections ? ((NSInteger(*)(id, SEL, id))WXOrigPluginsNumSections)(self, _cmd, tv) : 1;
+static NSInteger WXHookedPluginsNumSections(id self, SEL _cmd) {
+    NSInteger orig = WXOrigPluginsNumSections ? ((NSInteger(*)(id, SEL))WXOrigPluginsNumSections)(self, _cmd) : 1;
     return orig + 1; // 新增最后一个 Section
 }
-static NSInteger WXHookedPluginsNumRows(id self, SEL _cmd, UITableView *tv, NSInteger sec) {
-    NSInteger origSections = WXOrigPluginsNumSections ? ((NSInteger(*)(id, SEL, id))WXOrigPluginsNumSections)(self, _cmd, tv) : 1;
+static NSInteger WXHookedPluginsNumRows(id self, SEL _cmd, NSInteger sec) {
+    NSInteger origSections = WXOrigPluginsNumSections ? ((NSInteger(*)(id, SEL))WXOrigPluginsNumSections)(self, _cmd) : 1;
     if (sec == origSections) return 1; // 新增 Section 只有 1 行
-    return WXOrigPluginsNumRows ? ((NSInteger(*)(id, SEL, id, NSInteger))WXOrigPluginsNumRows)(self, _cmd, tv, sec) : 0;
+    return WXOrigPluginsNumRows ? ((NSInteger(*)(id, SEL, NSInteger))WXOrigPluginsNumRows)(self, _cmd, sec) : 0;
 }
-static UITableViewCell *WXHookedPluginsCellForRow(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    NSInteger origSections = WXOrigPluginsNumSections ? ((NSInteger(*)(id, SEL, id))WXOrigPluginsNumSections)(self, _cmd, tv) : 1;
+static UITableViewCell *WXHookedPluginsCellForRow(id self, SEL _cmd, NSIndexPath *ip) {
+    NSInteger origSections = WXOrigPluginsNumSections ? ((NSInteger(*)(id, SEL))WXOrigPluginsNumSections)(self, _cmd) : 1;
     if ([ip section] == origSections) {
         // 我们的 cell
         UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:BJCStr("wxresearchCell")];
         [[cell textLabel] setText:BJCStr("聊天研究")];
-        [[cell detailTextLabel] setText:BJCStr("v1.2.0")];
+        [[cell detailTextLabel] setText:BJCStr("v1.2.1")];
         [cell setAccessoryType:UITableViewCellAccessoryDisclosureIndicator];
         return cell;
     }
-    return WXOrigPluginsCellForRow ? ((UITableViewCell *(*)(id, SEL, id, NSIndexPath *))WXOrigPluginsCellForRow)(self, _cmd, tv, ip) : [[UITableViewCell alloc] init];
+    return WXOrigPluginsCellForRow ? ((UITableViewCell *(*)(id, SEL, NSIndexPath *))WXOrigPluginsCellForRow)(self, _cmd, ip) : [[UITableViewCell alloc] init];
 }
-static void WXHookedPluginsSelectRow(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    NSInteger origSections = WXOrigPluginsNumSections ? ((NSInteger(*)(id, SEL, id))WXOrigPluginsNumSections)(self, _cmd, tv) : 1;
+static void WXHookedPluginsSelectRow(id self, SEL _cmd, NSIndexPath *ip) {
+    NSInteger origSections = WXOrigPluginsNumSections ? ((NSInteger(*)(id, SEL))WXOrigPluginsNumSections)(self, _cmd) : 1;
     if ([ip section] == origSections) {
-        [tv deselectRowAtIndexPath:ip animated:YES];
+        UITableView *tv = [(id)self valueForKey:BJCStr("tableView")];
+        if (tv) [tv deselectRowAtIndexPath:ip animated:YES];
         // 打开设置页
         WXEnsureUITarget();
         WXRegisterSettingsVC();
@@ -1417,12 +1418,12 @@ static void WXHookedPluginsSelectRow(id self, SEL _cmd, UITableView *tv, NSIndex
         [(UIViewController *)self presentViewController:nav animated:YES completion:nil];
         return;
     }
-    if (WXOrigPluginsSelectRow) ((void(*)(id, SEL, id, NSIndexPath *))WXOrigPluginsSelectRow)(self, _cmd, tv, ip);
+    if (WXOrigPluginsSelectRow) ((void(*)(id, SEL, NSIndexPath *))WXOrigPluginsSelectRow)(self, _cmd, ip);
 }
-static NSString *WXHookedPluginsTitleHeader(id self, SEL _cmd, UITableView *tv, NSInteger sec) {
-    NSInteger origSections = WXOrigPluginsNumSections ? ((NSInteger(*)(id, SEL, id))WXOrigPluginsNumSections)(self, _cmd, tv) : 1;
+static NSString *WXHookedPluginsTitleHeader(id self, SEL _cmd, NSInteger sec) {
+    NSInteger origSections = WXOrigPluginsNumSections ? ((NSInteger(*)(id, SEL))WXOrigPluginsNumSections)(self, _cmd) : 1;
     if (sec == origSections) return BJCStr("工具");
-    return WXOrigPluginsTitleHeader ? ((NSString *(*)(id, SEL, id, NSInteger))WXOrigPluginsTitleHeader)(self, _cmd, tv, sec) : @"";
+    return WXOrigPluginsTitleHeader ? ((NSString *(*)(id, SEL, NSInteger))WXOrigPluginsTitleHeader)(self, _cmd, sec) : @"";
 }
 
 // =====================================================================
@@ -1451,29 +1452,33 @@ static NSString *WXHookedPluginsTitleHeader(id self, SEL _cmd, UITableView *tv, 
             NSLog(BJCStr("[wxresearch] WARN: BaseMsgContentViewController not found"));
         }
 
-        // Hook WCPluginsViewController（微信设置→插件页）
+        // Hook WCPluginsViewController（微信设置→插件页）— 微信用无前缀 MMTableView 协议
         Class pluginsVC = objc_getClass("WCPluginsViewController");
         if (pluginsVC) {
-            // numberOfSectionsInTableView:
-            Method m1 = class_getInstanceMethod(pluginsVC, sel_registerName("numberOfSectionsInTableView:"));
+            // numberOfSections（无参）
+            Method m1 = class_getInstanceMethod(pluginsVC, sel_registerName("numberOfSections"));
             if (m1) { WXOrigPluginsNumSections = method_getImplementation(m1); method_setImplementation(m1, (IMP)WXHookedPluginsNumSections); }
-            // tableView:numberOfRowsInSection:
-            Method m2 = class_getInstanceMethod(pluginsVC, sel_registerName("tableView:numberOfRowsInSection:"));
+            // numberOfRowsInSection:
+            Method m2 = class_getInstanceMethod(pluginsVC, sel_registerName("numberOfRowsInSection:"));
             if (m2) { WXOrigPluginsNumRows = method_getImplementation(m2); method_setImplementation(m2, (IMP)WXHookedPluginsNumRows); }
-            // tableView:cellForRowAtIndexPath:
-            Method m3 = class_getInstanceMethod(pluginsVC, sel_registerName("tableView:cellForRowAtIndexPath:"));
+            // cellForRowAtIndexPath:
+            Method m3 = class_getInstanceMethod(pluginsVC, sel_registerName("cellForRowAtIndexPath:"));
             if (m3) { WXOrigPluginsCellForRow = method_getImplementation(m3); method_setImplementation(m3, (IMP)WXHookedPluginsCellForRow); }
-            // tableView:didSelectRowAtIndexPath:
-            Method m4 = class_getInstanceMethod(pluginsVC, sel_registerName("tableView:didSelectRowAtIndexPath:"));
+            // didSelectRowAtIndexPath:
+            Method m4 = class_getInstanceMethod(pluginsVC, sel_registerName("didSelectRowAtIndexPath:"));
             if (m4) { WXOrigPluginsSelectRow = method_getImplementation(m4); method_setImplementation(m4, (IMP)WXHookedPluginsSelectRow); }
-            // tableView:titleForHeaderInSection:
-            Method m5 = class_getInstanceMethod(pluginsVC, sel_registerName("tableView:titleForHeaderInSection:"));
+            // titleForHeaderInSection:
+            Method m5 = class_getInstanceMethod(pluginsVC, sel_registerName("titleForHeaderInSection:"));
             if (m5) { WXOrigPluginsTitleHeader = method_getImplementation(m5); method_setImplementation(m5, (IMP)WXHookedPluginsTitleHeader); }
-            NSLog(BJCStr("[wxresearch] WCPluginsViewController hooked (5 methods)"));
+            WXLog(BJCStr("WCPluginsViewController hooked: m1=%d m2=%d m3=%d m4=%d m5=%d (no-prefix protocol)"),
+                  m1 != NULL, m2 != NULL, m3 != NULL, m4 != NULL, m5 != NULL);
+            NSLog(BJCStr("[wxresearch] WCPluginsViewController hooked (5 methods, no-prefix)"));
         } else {
+            WXLog(BJCStr("WARN: WCPluginsViewController not found (no plugins page?)"));
             NSLog(BJCStr("[wxresearch] WARN: WCPluginsViewController not found (no plugins page?)"));
         }
 
+        WXLog(BJCStr("ctor done, all hooks registered"));
         NSLog(BJCStr("[wxresearch] all hooks registered, waiting for user interaction"));
     }
 }
