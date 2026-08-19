@@ -1,4 +1,4 @@
-// 微信聊天研究 1.3.4 — pkc 式微信内插件（纯原生 UIKit 版）
+// 微信聊天研究 1.3.5 — pkc 式微信内插件（纯原生 UIKit 版）
 // 注入微信进程(com.tencent.xin)，长按+号 → pkc菜单 → 统计/AI分析/聊天记录
 // 原生 UIKit，无悬浮球，零读库直到点击
 // AI 调用走用户自配 API（NSUserDefaults 存储 URL/Key/Model）
@@ -785,7 +785,7 @@ static NSString *WXFindUsrNameIn(id obj, int depth) {
 // UITabBarController，WXTopVC 拿不到聊天 VC，导致 chatContact 全部取不到。
 static __weak UIViewController *WXCurChatVC = nil;
 
-// v1.3.4: pkc 式独立 UIWindow 容器（参考 PKCWeChatTools：alertWindow + makeKeyAndVisible +
+// v1.3.5: pkc 式独立 UIWindow 容器（参考 PKCWeChatTools：alertWindow + makeKeyAndVisible +
 // UIWindowLevelAlert）。微信新版 VC 层级会拦截/吞掉 present，独立窗口完全绕开微信层级。
 static UIWindow *WXMenuWindow = nil;
 
@@ -916,7 +916,7 @@ static void WXNavPop(BOOL animated) {
             UIViewController *top = WXTopVC();
             if (top) [top dismissViewControllerAnimated:YES completion:nil];
             WXPageOpen = NO;
-            // v1.3.4: 关闭后延迟隐藏独立窗口
+            // v1.3.5: 关闭后延迟隐藏独立窗口
             dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
                              dispatch_get_main_queue(), NULL, (dispatch_function_t)WXHideMenuWindow);
         }
@@ -1154,7 +1154,7 @@ static IMP WXOrigViewDidAppear = NULL;
 static void WXHookedViewDidAppear(id self, SEL _cmd, BOOL animated) {
     // 调用原实现
     if (WXOrigViewDidAppear) ((void(*)(id, SEL, BOOL))WXOrigViewDidAppear)(self, _cmd, animated);
-    // v1.3.4: 保存当前聊天 VC 实例（self 即 BaseMsgContentViewController，WXCurrentChatUser 直接用它取 chatContact，不再依赖 WXTopVC 反查）
+    // v1.3.5: 保存当前聊天 VC 实例（self 即 BaseMsgContentViewController，WXCurrentChatUser 直接用它取 chatContact，不再依赖 WXTopVC 反查）
     WXCurChatVC = self;
     // 挂长按手势（幂等）
     @autoreleasepool {
@@ -1197,7 +1197,7 @@ static void WXMenuBgTapped(id self, SEL _cmd, id sender) {
     @autoreleasepool {
         UIViewController *thisVC = (UIViewController *)self;
         [thisVC dismissViewControllerAnimated:YES completion:nil];
-        // v1.3.4: 关闭后延迟隐藏独立窗口（无 block，dispatch_after_f）
+        // v1.3.5: 关闭后延迟隐藏独立窗口（无 block，dispatch_after_f）
         dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
                          dispatch_get_main_queue(), NULL, (dispatch_function_t)WXHideMenuWindow);
     }
@@ -1281,21 +1281,64 @@ static void WXRegisterMenuVC(void) {
     objc_registerClassPair(WXMenuVCClass);
 }
 
-// 弹出 pkc 菜单
+// v1.3.5: WCActionSheet delegate（pkc 同款菜单：微信原生 ActionSheet，永不被微信层级拦截）
+static Class WXActionSheetTargetCls = nil;
+static id WXActionSheetTargetObj = nil;
+static long long WXASIdx[4] = {-1, -1, -1, -1}; // 统计/AI/聊天记录/设置 的按钮 index
+
+static void WXActionSheetClicked(id self, SEL _cmd, id sheet, long long idx) {
+    @autoreleasepool {
+        WXLog(BJCStr("actionSheet clicked idx=%lld"), idx);
+        for (int i = 0; i < 4; i++) {
+            if (WXASIdx[i] == idx) {
+                // i<=2（统计/AI/聊天记录）需要会话上下文；i==3=设置页无需
+                if (i <= 2 && !WXSetupCurrentChatContext()) {
+                    WXLog(BJCStr("no chat context, abort mode %d"), i);
+                    return;
+                }
+                WXNextVCMode = i;
+                dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                                 dispatch_get_main_queue(), NULL, (dispatch_function_t)WXPresentNext);
+                return;
+            }
+        }
+        // 取消或其他：无操作
+    }
+}
+
+// 弹出 pkc 菜单（v1.3.5: 微信原生 WCActionSheet，pkc 同款）
 static void WXShowPKCMenu(void) {
     @autoreleasepool {
         WXEnsureUITarget();
-        WXRegisterMenuVC();
+        WXRegisterMenuVC(); // 备用类注册（防 unused 警告，保留旧菜单实现）
         // 获取当前会话名（KVC，不读库）
         WXSessName = WXCurrentChatName();
         WXSessUsr = WXCurrentChatUser();
-        UIViewController *menuVC = [[WXMenuVCClass alloc] init];
-        [menuVC setModalPresentationStyle:UIModalPresentationOverCurrentContext];
-        [menuVC setModalTransitionStyle:UIModalTransitionStyleCrossDissolve];
-        UIViewController *top = WXContainerVC();
-        [top presentViewController:menuVC animated:YES completion:nil];
+        Class sheetCls = objc_getClass("WCActionSheet");
+        if (!sheetCls) {
+            WXLog(BJCStr("WCActionSheet class not found!"));
+            return;
+        }
+        // delegate 动态类（无 block，IMP 直连）
+        if (!WXActionSheetTargetCls) {
+            WXActionSheetTargetCls = objc_allocateClassPair([NSObject class], "WXASDelegate", 0);
+            class_addMethod(WXActionSheetTargetCls, sel_registerName("actionSheet:clickedButtonAtIndex:"),
+                            (IMP)WXActionSheetClicked, "v@:@q");
+            objc_registerClassPair(WXActionSheetTargetCls);
+            WXActionSheetTargetObj = [[WXActionSheetTargetCls alloc] init];
+        }
+        id sheet = ((id(*)(id, SEL, id, id, id, id, id))objc_msgSend)(
+            ((id(*)(id, SEL))objc_msgSend)(sheetCls, sel_registerName("alloc")),
+            sel_registerName("initWithTitle:delegate:cancelButtonTitle:destructiveButtonTitle:otherButtonTitles:"),
+            (WXSessName ?: BJCStr("聊天研究")), WXActionSheetTargetObj, BJCStr("取消"), nil, nil);
+        if (!sheet) { WXLog(BJCStr("WCActionSheet alloc/init failed")); return; }
+        WXASIdx[0] = ((long long(*)(id, SEL, id))objc_msgSend)(sheet, sel_registerName("addButtonWithTitle:"), BJCStr("📊 统计"));
+        WXASIdx[1] = ((long long(*)(id, SEL, id))objc_msgSend)(sheet, sel_registerName("addButtonWithTitle:"), BJCStr("🤖 AI 分析"));
+        WXASIdx[2] = ((long long(*)(id, SEL, id))objc_msgSend)(sheet, sel_registerName("addButtonWithTitle:"), BJCStr("💬 聊天记录"));
+        WXASIdx[3] = ((long long(*)(id, SEL, id))objc_msgSend)(sheet, sel_registerName("addButtonWithTitle:"), BJCStr("⚙️ 设置"));
         WXPageOpen = YES;
-        WXLog(BJCStr("pkc menu shown, sess=%@"), WXSessName);
+        WXLog(BJCStr("pkc menu shown via WCActionSheet, sess=%@ idx=%lld/%lld/%lld/%lld"),
+              WXSessName, WXASIdx[0], WXASIdx[1], WXASIdx[2], WXASIdx[3]);
     }
 }
 
@@ -1536,7 +1579,7 @@ static UITableViewCell *WXSettingsVCCell(id self, SEL _cmd, UITableView *tv, NSI
         } else {
             UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:BJCStr("setCell")];
             [[cell textLabel] setText:BJCStr("版本")];
-            [[cell detailTextLabel] setText:BJCStr("v1.3.0")];
+            [[cell detailTextLabel] setText:BJCStr("v1.3.5")];
             [cell setSelectionStyle:UITableViewCellSelectionStyleNone];
             return cell;
         }
@@ -1588,7 +1631,7 @@ static void WXUncaughtExceptionHandler(NSException *exception) {
 %ctor {
     @autoreleasepool {
         NSSetUncaughtExceptionHandler(&WXUncaughtExceptionHandler);
-        NSLog(BJCStr("[wxresearch] dylib loaded v1.3.4 (pkc entry)"));
+        NSLog(BJCStr("[wxresearch] dylib loaded v1.3.5 (pkc entry)"));
         // 初始化联系人缓存
         WXContactCache = [NSMutableDictionary dictionary];
         // 初始化 AI 历史
@@ -1627,9 +1670,9 @@ static void WXUncaughtExceptionHandler(NSException *exception) {
             if (mgr) {
                 NSString *clsName = NSStringFromClass(WXSettingsVCClass);
                 ((void(*)(id, SEL, id, id, id))objc_msgSend)(mgr, sel_registerName("registerControllerWithTitle:version:controller:"),
-                    BJCStr("聊天研究"), BJCStr("v1.3.4"), clsName);
-                WXLog(BJCStr("WCPluginsMgr registered entry: 聊天研究 v1.3.4 -> %@"), clsName);
-                NSLog(BJCStr("[wxresearch] WCPluginsMgr registered: 聊天研究 v1.3.4 -> %@"), clsName);
+                    BJCStr("聊天研究"), BJCStr("v1.3.5"), clsName);
+                WXLog(BJCStr("WCPluginsMgr registered entry: 聊天研究 v1.3.5 -> %@"), clsName);
+                NSLog(BJCStr("[wxresearch] WCPluginsMgr registered: 聊天研究 v1.3.5 -> %@"), clsName);
             } else {
                 WXLog(BJCStr("WARN: WCPluginsMgr sharedInstance returned nil"));
             }
