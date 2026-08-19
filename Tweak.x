@@ -1,4 +1,4 @@
-// 微信聊天研究 1.2.3 — pkc 式微信内插件（纯原生 UIKit 版）
+// 微信聊天研究 1.3.0 — pkc 式微信内插件（纯原生 UIKit 版）
 // 注入微信进程(com.tencent.xin)，长按+号 → pkc菜单 → 统计/AI分析/聊天记录
 // 原生 UIKit，无悬浮球，零读库直到点击
 // AI 调用走用户自配 API（NSUserDefaults 存储 URL/Key/Model）
@@ -403,10 +403,18 @@ static NSString *WXMessagesToText(NSArray *msgs, NSString *selfName, NSString *o
 static NSString *WXAIRequestURL(NSString *baseURL, NSString *apiKey, NSString *model,
                                 NSArray *messages, int timeoutSec) {
     if (!apiKey || ![apiKey length]) return nil;
+    // v1.3.0: temperature 从设置读取（默认 1.3，DeepSeek 官方推荐）
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    double temp = 1.3;
+    NSString *tempStr = [ud stringForKey:BJCStr("wxresearch_ai_temp")];
+    if (tempStr && [tempStr length]) {
+        double t = [tempStr doubleValue];
+        if (t >= 0 && t <= 2) temp = t;
+    }
     NSMutableDictionary *payload = [NSMutableDictionary dictionary];
     payload[BJCStr("model")] = model;
     payload[BJCStr("messages")] = messages;
-    payload[BJCStr("temperature")] = @(0.7);
+    payload[BJCStr("temperature")] = @(temp);
     payload[BJCStr("max_tokens")] = @(4096);
     NSData *bodyData = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
     if (!bodyData) return nil;
@@ -490,13 +498,18 @@ static void WXAIResearchMain(void *ctx) {
             return;
         }
         
-        NSArray *msgs = WXFetchMessagesRange(db, table, startTs, endTs, 500);
+        NSArray *msgs = WXFetchMessagesRange(db, table, startTs, endTs, 2000);
         WXLog(BJCStr("AI fetch msgs=%lu start=%lld end=%lld"), (unsigned long)[msgs count], startTs, endTs);
         if (![msgs count]) {
             dispatch_async_f(dispatch_get_main_queue(), (void *)(long)cbId, (dispatch_function_t)WXAICBEmptyNative);
             return;
         }
         NSString *chatText = WXMessagesToText(msgs, BJCStr("我"), name);
+        // v1.3.0: 超长截断保护（约 60000 字，防 token 爆炸）
+        if ([chatText length] > 60000) {
+            chatText = [chatText substringToIndex:60000];
+            chatText = [chatText stringByAppendingString:BJCStr("\n\n……(记录过长已截断)")];
+        }
         
         NSString *sysPrompt = [NSString stringWithFormat:BJCStr(
             "你是聊天记录研究助手。以下是「%@」的聊天记录（时间正序，格式：时间 发送者: 内容）。"
@@ -513,6 +526,10 @@ static void WXAIResearchMain(void *ctx) {
             NSString *sysShort = [NSString stringWithFormat:BJCStr(
                 "以下是「%@」的聊天记录，已作为对话上下文。回答用户关于这段聊天的问题，用中文。"), name];
             WXAIHistory = [NSMutableArray arrayWithObject:@{BJCStr("role"): BJCStr("system"), BJCStr("content"): sysShort}];
+            // v1.3.0: 若带了初始问题（没点开始分析直接追问），一并入请求
+            if ([userQuestion length]) {
+                [history addObject:@{BJCStr("role"): BJCStr("user"), BJCStr("content"): userQuestion}];
+            }
         }
         
         NSString *respJson = WXAIRequestChain(history, 120);
@@ -961,22 +978,75 @@ static BOOL WXSetupCurrentChatContext(void) {
 // 长按「+」号 → pkc 菜单
 // =====================================================================
 
-// 递归找「+」号按钮：屏幕底部区域最右 UIButton（宽 24~90、y > 屏高 50%）
+// =====================================================================
+// v1.3.0: 入口复刻 pkc —— 长按表情按钮（主）+ 长按+号（兜底）
+// pkc 实锤：hook BaseMsgContentViewController initToolView → 拿 expressionButton 挂长按
+// =====================================================================
+
+// 递归找 MMInputToolView（输入条容器）
+static UIView *WXFindInputToolViewIn(UIView *view) {
+    if (!view) return nil;
+    NSString *cn = NSStringFromClass([view class]);
+    if ([cn rangeOfString:BJCStr("MMInputToolView")].location != NSNotFound) return view;
+    for (UIView *sub in view.subviews) {
+        UIView *f = WXFindInputToolViewIn(sub);
+        if (f) return f;
+    }
+    return nil;
+}
+
+// 递归收集按钮
+static void WXCollectButtonsIn(UIView *view, NSMutableArray *arr) {
+    if (!view) return;
+    if ([view isKindOfClass:[UIButton class]]) [arr addObject:view];
+    for (UIView *sub in view.subviews) WXCollectButtonsIn(sub, arr);
+}
+
+// 从输入条里找表情按钮（expressionButton，pkc 同款）
+static UIButton *WXFindEmoticonButtonIn(UIView *view) {
+    UIView *tool = WXFindInputToolViewIn(view);
+    if (!tool) return nil;
+    // 方式1：KVC 拿 expressionButton
+    @try {
+        id eb = [tool valueForKey:BJCStr("expressionButton")];
+        if (eb && [eb isKindOfClass:[UIButton class]]) return (UIButton *)eb;
+    } @catch(NSException *e) {}
+    // 方式2：递归在输入条里找按钮——表情按钮是输入条中"最右倒数第二个"按钮（最右是+号）
+    // 简化：找输入条里 x 坐标最大的两个按钮，取第二个
+    NSMutableArray *btns = [NSMutableArray array];
+    WXCollectButtonsIn(tool, btns);
+    if ([btns count] < 2) return nil;
+    // 按 x 排序取次大
+    UIButton *max1 = nil, *max2 = nil;
+    CGFloat x1 = -1, x2 = -1;
+    for (UIButton *b in btns) {
+        CGRect f = b.frame;
+        CGFloat bx = f.origin.x;
+        if (bx >= x1) { x2 = x1; max2 = max1; x1 = bx; max1 = b; }
+        else if (bx >= x2) { x2 = bx; max2 = b; }
+    }
+    return max2;
+}
+
+// 递归找「+」号按钮：屏幕底部区域最右 UIButton（宽 24~90、窗口坐标 y > 屏高 50%）
+// v1.3.0: 修复 frame 相对父视图坐标 bug → convertRect 转窗口坐标
 static UIButton *WXFindPlusButtonIn(UIView *view) {
     CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
+    UIWindow *win = [UIApplication sharedApplication].keyWindow;
+    if (!win && [[UIApplication sharedApplication].windows count]) win = [UIApplication sharedApplication].windows[0];
     UIButton *candidate = nil;
     CGFloat maxX = 0;
     for (UIView *sub in view.subviews) {
         if ([sub isKindOfClass:[UIButton class]]) {
             UIButton *btn = (UIButton *)sub;
-            CGRect f = btn.frame;
+            CGRect f = win ? [btn.superview convertRect:btn.frame toView:win] : btn.frame;
             if (f.size.width >= 24 && f.size.width <= 90 && f.origin.y > screenH * 0.5) {
                 if (f.origin.x >= maxX) { maxX = f.origin.x; candidate = btn; }
             }
         }
         UIButton *found = WXFindPlusButtonIn(sub);
         if (found) {
-            CGRect f = found.frame;
+            CGRect f = win ? [found.superview convertRect:found.frame toView:win] : found.frame;
             if (f.origin.x >= maxX) { maxX = f.origin.x; candidate = found; }
         }
     }
@@ -999,13 +1069,25 @@ static void WXOnLongPressPlus(id self, SEL _cmd, UILongPressGestureRecognizer *g
     }
 }
 
-// 幂等挂载长按手势到 + 号按钮
+// 幂等挂载长按手势：优先表情按钮（pkc 同款），兜底+号按钮；各自受设置开关控制
 static void WXAttachLongPress(UIView *view) {
     if (WXPlusBtnAttempts >= 5) return; // 最多尝试 5 次
-    UIButton *plus = WXFindPlusButtonIn(view);
-    if (!plus) { WXPlusBtnAttempts++; WXLog(BJCStr("plus button not found (attempt %d)"), WXPlusBtnAttempts); return; }
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    BOOL emojiOn = [ud objectForKey:BJCStr("wxresearch_entry_emoji")] ? [ud boolForKey:BJCStr("wxresearch_entry_emoji")] : YES;
+    BOOL plusOn  = [ud objectForKey:BJCStr("wxresearch_entry_plus")] ? [ud boolForKey:BJCStr("wxresearch_entry_plus")] : YES;
+    UIButton *target = nil;
+    NSString *tgtName = nil;
+    if (emojiOn) {
+        target = WXFindEmoticonButtonIn(view);
+        if (target) tgtName = BJCStr("emoticon");
+    }
+    if (!target && plusOn) {
+        target = WXFindPlusButtonIn(view);
+        if (target) tgtName = BJCStr("plus");
+    }
+    if (!target) { WXPlusBtnAttempts++; WXLog(BJCStr("entry button not found (attempt %d)"), WXPlusBtnAttempts); return; }
     // 检查是否已挂载
-    for (UIGestureRecognizer *g in plus.gestureRecognizers) {
+    for (UIGestureRecognizer *g in target.gestureRecognizers) {
         if ([g isKindOfClass:[UILongPressGestureRecognizer class]]) return; // 已挂载
     }
     if (!WXLongPressTargetCls) {
@@ -1016,8 +1098,20 @@ static void WXAttachLongPress(UIView *view) {
     }
     UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:WXLongPressTarget action:@selector(onLongPress:)];
     [lp setMinimumPressDuration:0.5];
-    [plus addGestureRecognizer:lp];
-    WXLog(BJCStr("long-press gesture attached to plus button"));
+    [target addGestureRecognizer:lp];
+    WXLog(BJCStr("long-press gesture attached to %@ button"), tgtName);
+}
+
+// swizzle BaseMsgContentViewController initToolView（pkc 同款：输入条构建后立刻挂长按）
+static IMP WXOrigInitToolView = NULL;
+static id WXHookedInitToolView(id self, SEL _cmd) {
+    id r = nil;
+    if (WXOrigInitToolView) r = ((id(*)(id, SEL))WXOrigInitToolView)(self, _cmd);
+    @autoreleasepool {
+        UIView *v = BJ_MSG_SEND0(self, sel_registerName("view"));
+        WXAttachLongPress(v);
+    }
+    return r;
 }
 
 // swizzle BaseMsgContentViewController viewDidAppear:
@@ -1256,11 +1350,18 @@ static id WXSettingsTarget = nil;
 static UITextField *WXSetURLField = nil;
 static UITextField *WXSetKeyField = nil;
 static UITextField *WXSetModelField = nil;
+static UITextField *WXSetTempField = nil; // v1.3.0: AI 温度
 static UISwitch *WXSetEnabledSwitch = nil;
+static UISwitch *WXSetEmojiSwitch = nil;   // v1.3.0: 长按表情入口
+static UISwitch *WXSetPlusSwitch = nil;    // v1.3.0: 长按+号入口
+static UISwitch *WXSetRevokeSwitch = nil;  // v1.3.0: 防撤回记录
+// v1.3.0: 当前设置 VC 实例（返回按钮 pop/dismiss 判断用）
+static UIViewController *WXCurSettingsVC = nil;
 
 static void WXSettingsVCViewDidLoad(id self, SEL _cmd) {
     @autoreleasepool {
         UIViewController *vc = (UIViewController *)self;
+        WXCurSettingsVC = vc; // v1.3.0: 记录实例
         [vc setTitle:BJCStr("聊天研究")];
         UIView *v = BJ_MSG_SEND0(self, sel_registerName("view"));
         [v setBackgroundColor:WX_BG_COLOR];
@@ -1273,12 +1374,13 @@ static void WXSettingsVCViewDidLoad(id self, SEL _cmd) {
         if (!WXSettingsTargetCls) {
             WXSettingsTargetCls = objc_allocateClassPair([NSObject class], "WXSetTarget", 0);
             class_addMethod(WXSettingsTargetCls, sel_registerName("tfDone:"), (IMP)WXSettingsTFDone, "v@:@");
+            class_addMethod(WXSettingsTargetCls, sel_registerName("backTapped:"), (IMP)WXSettingsBackTapped, "v@:@");
             class_addMethod(WXSettingsTargetCls, sel_registerName("switchChanged:"), (IMP)WXSettingsSwitchChanged, "v@:@");
             objc_registerClassPair(WXSettingsTargetCls);
             WXSettingsTarget = [[WXSettingsTargetCls alloc] init];
         }
-        // 导航栏返回按钮
-        vc.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:BJCStr("返回") style:UIBarButtonItemStylePlain target:WXSettingsTarget action:@selector(tfDone:)];
+        // 导航栏返回按钮（v1.3.0: 改 backTapped，修复退出黑屏）
+        vc.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:BJCStr("返回") style:UIBarButtonItemStylePlain target:WXSettingsTarget action:@selector(backTapped:)];
     }
 }
 static void WXSettingsTFDone(id self, SEL _cmd, id sender) {
@@ -1288,25 +1390,59 @@ static void WXSettingsTFDone(id self, SEL _cmd, id sender) {
         if (WXSetURLField) [ud setObject:[WXSetURLField text] forKey:BJCStr("wxresearch_ai_url")];
         if (WXSetKeyField) [ud setObject:[WXSetKeyField text] forKey:BJCStr("wxresearch_ai_key")];
         if (WXSetModelField) [ud setObject:[WXSetModelField text] forKey:BJCStr("wxresearch_ai_model")];
+        if (WXSetTempField) [ud setObject:[WXSetTempField text] forKey:BJCStr("wxresearch_ai_temp")];
         [ud synchronize];
         WXLog(BJCStr("settings saved"));
-        // dismiss
-        UIViewController *top = WXTopVC();
-        [top dismissViewControllerAnimated:YES completion:nil];
     }
 }
+// v1.3.0: 返回按钮：push 进来 → pop；present 进来 → dismiss（修复退出设置页黑屏）
+static void WXSettingsBackTapped(id self, SEL _cmd, id sender) {
+    @autoreleasepool {
+        // 先保存
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        if (WXSetURLField) [ud setObject:[WXSetURLField text] forKey:BJCStr("wxresearch_ai_url")];
+        if (WXSetKeyField) [ud setObject:[WXSetKeyField text] forKey:BJCStr("wxresearch_ai_key")];
+        if (WXSetModelField) [ud setObject:[WXSetModelField text] forKey:BJCStr("wxresearch_ai_model")];
+        if (WXSetTempField) [ud setObject:[WXSetTempField text] forKey:BJCStr("wxresearch_ai_temp")];
+        [ud synchronize];
+        WXLog(BJCStr("settings back tapped"));
+        UIViewController *vc = WXCurSettingsVC;
+        if (!vc) vc = WXTopVC();
+        UINavigationController *nav = nil;
+        if ([vc respondsToSelector:@selector(navigationController)])
+            nav = [vc navigationController];
+        if (nav && [[nav viewControllers] count] > 1) {
+            [nav popViewControllerAnimated:YES]; // push 进来 → pop
+        } else {
+            [vc dismissViewControllerAnimated:YES completion:nil]; // present 进来 → dismiss
+        }
+    }
+}
+// v1.3.0: 开关变化：按 tag 区分存储（100=总开关 101=长按表情 102=长按+号 103=防撤回）
 static void WXSettingsSwitchChanged(id self, SEL _cmd, UISwitch *sw) {
     @autoreleasepool {
         NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-        [ud setBool:[sw isOn] forKey:BJCStr("wxresearch_enabled")];
+        NSInteger tag = [sw tag];
+        if (tag == 101) {
+            [ud setBool:[sw isOn] forKey:BJCStr("wxresearch_entry_emoji")];
+            WXLog(BJCStr("entry emoji=%d"), [sw isOn] ? 1 : 0);
+        } else if (tag == 102) {
+            [ud setBool:[sw isOn] forKey:BJCStr("wxresearch_entry_plus")];
+            WXLog(BJCStr("entry plus=%d"), [sw isOn] ? 1 : 0);
+        } else if (tag == 103) {
+            [ud setBool:[sw isOn] forKey:BJCStr("wxresearch_revoke")];
+            WXLog(BJCStr("revoke record=%d"), [sw isOn] ? 1 : 0);
+        } else {
+            [ud setBool:[sw isOn] forKey:BJCStr("wxresearch_enabled")];
+            WXLog(BJCStr("plugin enabled=%d"), [sw isOn] ? 1 : 0);
+        }
         [ud synchronize];
-        WXLog(BJCStr("plugin enabled=%d"), [sw isOn] ? 1 : 0);
     }
 }
 static NSInteger WXSettingsVCSections(id self, SEL _cmd, UITableView *tv) { return 3; }
 static NSInteger WXSettingsVCRows(id self, SEL _cmd, UITableView *tv, NSInteger sec) {
-    if (sec == 0) return 3; // URL/Key/Model
-    if (sec == 1) return 1; // 总开关
+    if (sec == 0) return 4; // URL/Key/Model/温度
+    if (sec == 1) return 4; // 总开关/长按表情/长按+号/防撤回
     if (sec == 2) return 1; // 版本号
     return 0;
 }
@@ -1320,9 +1456,9 @@ static UITableViewCell *WXSettingsVCCell(id self, SEL _cmd, UITableView *tv, NSI
     @autoreleasepool {
         NSInteger sec = [ip section], row = [ip row];
         if (sec == 0) {
-            const char *labels[] = {"接口地址", "API Key", "模型名"};
-            const char *keys[] = {"wxresearch_ai_url", "wxresearch_ai_key", "wxresearch_ai_model"};
-            const char *defaults[] = {"https://api.deepseek.com/v1/chat/completions", "", "deepseek-chat"};
+            const char *labels[] = {"接口地址", "API Key", "模型名", "AI 温度(0-2)"};
+            const char *keys[] = {"wxresearch_ai_url", "wxresearch_ai_key", "wxresearch_ai_model", "wxresearch_ai_temp"};
+            const char *defaults[] = {"https://api.deepseek.com/v1/chat/completions", "", "deepseek-chat", "1.3"};
             UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:BJCStr("setCell")];
             [[cell textLabel] setText:BJCStr(labels[row])];
             // UITextField
@@ -1331,29 +1467,41 @@ static UITableViewCell *WXSettingsVCCell(id self, SEL _cmd, UITableView *tv, NSI
             [tf setFont:[UIFont systemFontOfSize:14]];
             [tf setClearButtonMode:UITextFieldViewModeWhileEditing];
             [tf setReturnKeyType:UIReturnKeyDone];
+            [tf setKeyboardType:(row == 3 ? UIKeyboardTypeDecimalPad : UIKeyboardTypeDefault)];
             [tf addTarget:WXSettingsTarget action:@selector(tfDone:) forControlEvents:UIControlEventEditingDidEndOnExit];
             NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
             NSString *val = [ud objectForKey:BJCStr(keys[row])];
             [tf setText:val ?: BJCStr(defaults[row])];
             if (row == 0) WXSetURLField = tf;
             else if (row == 1) WXSetKeyField = tf;
-            else WXSetModelField = tf;
+            else if (row == 2) WXSetModelField = tf;
+            else WXSetTempField = tf;
             [cell.contentView addSubview:tf];
             return cell;
         } else if (sec == 1) {
+            // 通用区：总开关/长按表情/长按+号/防撤回
+            const char *labels[] = {"启用插件", "长按表情按钮", "长按+号按钮", "防撤回记录"};
+            const char *keys[] = {"wxresearch_enabled", "wxresearch_entry_emoji", "wxresearch_entry_plus", "wxresearch_revoke"};
+            NSInteger tags[] = {100, 101, 102, 103};
             UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:BJCStr("setCell")];
-            [[cell textLabel] setText:BJCStr("启用插件")];
+            [[cell textLabel] setText:BJCStr(labels[row])];
             UISwitch *sw = [[UISwitch alloc] init];
+            [sw setTag:tags[row]];
             NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-            [sw setOn:([ud objectForKey:BJCStr("wxresearch_enabled")] ? [ud boolForKey:BJCStr("wxresearch_enabled")] : YES)];
+            BOOL on = YES;
+            if ([ud objectForKey:BJCStr(keys[row])]) on = [ud boolForKey:BJCStr(keys[row])];
+            [sw setOn:on];
             [sw addTarget:WXSettingsTarget action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
-            WXSetEnabledSwitch = sw;
+            if (row == 0) WXSetEnabledSwitch = sw;
+            else if (row == 1) WXSetEmojiSwitch = sw;
+            else if (row == 2) WXSetPlusSwitch = sw;
+            else WXSetRevokeSwitch = sw;
             [cell setAccessoryView:sw];
             return cell;
         } else {
             UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:BJCStr("setCell")];
             [[cell textLabel] setText:BJCStr("版本")];
-            [[cell detailTextLabel] setText:BJCStr("v1.2.3")];
+            [[cell detailTextLabel] setText:BJCStr("v1.3.0")];
             [cell setSelectionStyle:UITableViewCellSelectionStyleNone];
             return cell;
         }
@@ -1405,7 +1553,7 @@ static void WXUncaughtExceptionHandler(NSException *exception) {
 %ctor {
     @autoreleasepool {
         NSSetUncaughtExceptionHandler(&WXUncaughtExceptionHandler);
-        NSLog(BJCStr("[wxresearch] dylib loaded v1.2.3 (pkc entry)"));
+        NSLog(BJCStr("[wxresearch] dylib loaded v1.3.0 (pkc entry)"));
         // 初始化联系人缓存
         WXContactCache = [NSMutableDictionary dictionary];
         // 初始化 AI 历史
@@ -1422,6 +1570,15 @@ static void WXUncaughtExceptionHandler(NSException *exception) {
             } else {
                 NSLog(BJCStr("[wxresearch] WARN: viewDidAppear: not found on BaseMsgContentViewController"));
             }
+            // v1.3.0: 也 hook initToolView（pkc 同款，输入条构建后立刻挂长按）
+            Method mi = class_getInstanceMethod(chatVC, sel_registerName("initToolView"));
+            if (mi) {
+                WXOrigInitToolView = method_getImplementation(mi);
+                method_setImplementation(mi, (IMP)WXHookedInitToolView);
+                NSLog(BJCStr("[wxresearch] BaseMsgContentViewController initToolView hooked"));
+            } else {
+                NSLog(BJCStr("[wxresearch] WARN: initToolView not found on BaseMsgContentViewController"));
+            }
         } else {
             NSLog(BJCStr("[wxresearch] WARN: BaseMsgContentViewController not found"));
         }
@@ -1435,9 +1592,9 @@ static void WXUncaughtExceptionHandler(NSException *exception) {
             if (mgr) {
                 NSString *clsName = NSStringFromClass(WXSettingsVCClass);
                 ((void(*)(id, SEL, id, id, id))objc_msgSend)(mgr, sel_registerName("registerControllerWithTitle:version:controller:"),
-                    BJCStr("聊天研究"), BJCStr("v1.2.3"), clsName);
-                WXLog(BJCStr("WCPluginsMgr registered entry: 聊天研究 v1.2.3 -> %@"), clsName);
-                NSLog(BJCStr("[wxresearch] WCPluginsMgr registered: 聊天研究 v1.2.3 -> %@"), clsName);
+                    BJCStr("聊天研究"), BJCStr("v1.3.0"), clsName);
+                WXLog(BJCStr("WCPluginsMgr registered entry: 聊天研究 v1.3.0 -> %@"), clsName);
+                NSLog(BJCStr("[wxresearch] WCPluginsMgr registered: 聊天研究 v1.3.0 -> %@"), clsName);
             } else {
                 WXLog(BJCStr("WARN: WCPluginsMgr sharedInstance returned nil"));
             }
@@ -2942,6 +3099,28 @@ static void WXAIStart(void) {
 static void WXAIAsk(NSString *q) {
     @autoreleasepool {
         if (![q length] || WXAIBusy) return;
+        // v1.3.0: 如果还没有分析历史（用户没点"开始分析"直接追问）→ 自动按当前范围先分析
+        if (![WXAIHistory count]) {
+            WXLog(BJCStr("AI ask without history, auto-start analysis first"));
+            // 把问题暂存为初始问题，走 WXAIStart 流程
+            WXAIBusy = YES;
+            if (WXAIInputField) WXAIInputField.enabled = NO;
+            if (WXAIVCInstance) {
+                UIView *v = BJ_MSG_SEND0(WXAIVCInstance, sel_registerName("view"));
+                UIView *loading = [v viewWithTag:900];
+                if (loading) loading.hidden = NO;
+            }
+            WXAIHistory = nil;
+            long long s = 0, e = 0;
+            if (WXAIRangeType == WXRangeCustom) {
+                s = WXAIRangeStart; e = WXAIRangeEnd;
+            } else if (WXAIRangeType != WXRangeAll) {
+                WXCalcRange(WXAIRangeType, &s, &e, 0, 0);
+            }
+            WXAICbId++;
+            WXStartAIResearch(WXSessDB, WXSessTable, WXSessName ?: BJCStr("对方"), s, e, WXAICbId, q);
+            return;
+        }
         WXAIBusy = YES;
         if (WXAIInputField) WXAIInputField.enabled = NO;
         if (WXAIVCInstance) {
@@ -2966,6 +3145,15 @@ static void WXAIVCViewDidLoad(id self, SEL _cmd) {
         UINavigationItem *ni = [self performSelector:@selector(navigationItem)];
         ni.title = [NSString stringWithFormat:BJCStr("AI研究 - %@"), WXSessName ?: BJCStr("聊天")];
         ni.leftBarButtonItem = WXMakeBackBtn();
+        // v1.3.0: 右侧"清空"按钮——重置对话上下文重新分析
+        UIButton *clearB = [UIButton buttonWithType:UIButtonTypeSystem];
+        [clearB setTitle:BJCStr("清空") forState:UIControlStateNormal];
+        [clearB setTitleColor:WX_THEME_COLOR forState:UIControlStateNormal];
+        clearB.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+        [clearB sizeToFit];
+        clearB.tag = 697;
+        [clearB addTarget:WXUITarget action:@selector(uiAct:) forControlEvents:UIControlEventTouchUpInside];
+        ni.rightBarButtonItem = [[UIBarButtonItem alloc] initWithCustomView:clearB];
         
         // 如果是从统计跳转过来的自定义范围 → 直接开始分析
         BOOL directStart = NO;
@@ -3067,6 +3255,7 @@ static void WXAIVCViewDidLoad(id self, SEL _cmd) {
         tv.font = [UIFont systemFontOfSize:15];
         tv.textColor = WX_TEXT_COLOR;
         tv.editable = NO;
+        tv.selectable = YES; // v1.3.0: 结果可选中复制
         tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         tv.textContainerInset = UIEdgeInsetsMake(14, 14, 14, 14);
         [v addSubview:tv];
@@ -3161,6 +3350,18 @@ static void WXAIVCOnAction(id self, SEL _cmd, NSNotification *n) {
                 [WXAIInputField setText:@""];
                 [WXAIInputField resignFirstResponder];
                 WXAIAsk(q);
+            } else if (tag == 697) { // v1.3.0: 清空对话
+                WXAIHistory = nil;
+                WXAIMessages = nil;
+                WXAIBusy = NO;
+                if (WXAIInputField) WXAIInputField.enabled = YES;
+                if (WXAIVCInstance) {
+                    UIView *v = BJ_MSG_SEND0(WXAIVCInstance, sel_registerName("view"));
+                    UIView *loading = [v viewWithTag:900];
+                    if (loading) loading.hidden = YES;
+                }
+                WXLog(BJCStr("AI conversation cleared"));
+                WXAIReloadResult();
             } else {
                 // 时间范围
                 WXRangeType t = (WXRangeType)(tag - 600);

@@ -1,9 +1,9 @@
 Package: cn.wxresearch.chat
 Name: 微信聊天研究
-Author: Hermes
+Author: 傘
 Description: pkc 式微信聊天研究插件：长按+号 → 统计/AI分析/聊天记录，原生 UIKit，零读库直到点击
 Depends: ellekit
 Maintainer: Hermes
 Section: roothide插件
 Architecture: iphoneos-arm64e
-Version: 1.2.3
+Version: 1.3.0
