@@ -1,4 +1,4 @@
-// 微信聊天研究 1.3.3 — pkc 式微信内插件（纯原生 UIKit 版）
+// 微信聊天研究 1.3.4 — pkc 式微信内插件（纯原生 UIKit 版）
 // 注入微信进程(com.tencent.xin)，长按+号 → pkc菜单 → 统计/AI分析/聊天记录
 // 原生 UIKit，无悬浮球，零读库直到点击
 // AI 调用走用户自配 API（NSUserDefaults 存储 URL/Key/Model）
@@ -785,6 +785,25 @@ static NSString *WXFindUsrNameIn(id obj, int depth) {
 // UITabBarController，WXTopVC 拿不到聊天 VC，导致 chatContact 全部取不到。
 static __weak UIViewController *WXCurChatVC = nil;
 
+// v1.3.4: pkc 式独立 UIWindow 容器（参考 PKCWeChatTools：alertWindow + makeKeyAndVisible +
+// UIWindowLevelAlert）。微信新版 VC 层级会拦截/吞掉 present，独立窗口完全绕开微信层级。
+static UIWindow *WXMenuWindow = nil;
+
+static UIViewController *WXContainerVC(void) {
+    if (!WXMenuWindow) {
+        WXMenuWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        [WXMenuWindow setWindowLevel:UIWindowLevelAlert + 1];
+        [WXMenuWindow setRootViewController:[[UIViewController alloc] init]];
+        [WXMenuWindow makeKeyAndVisible];
+    }
+    if ([WXMenuWindow isHidden]) [WXMenuWindow setHidden:NO];
+    return [WXMenuWindow rootViewController];
+}
+
+static void WXHideMenuWindow(void) {
+    if (WXMenuWindow) [WXMenuWindow setHidden:YES];
+}
+
 static UIViewController *WXTopVC(void) {
     UIWindow *win = nil;
     NSArray *wins = [UIApplication sharedApplication].windows;
@@ -897,6 +916,9 @@ static void WXNavPop(BOOL animated) {
             UIViewController *top = WXTopVC();
             if (top) [top dismissViewControllerAnimated:YES completion:nil];
             WXPageOpen = NO;
+            // v1.3.4: 关闭后延迟隐藏独立窗口
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+                             dispatch_get_main_queue(), NULL, (dispatch_function_t)WXHideMenuWindow);
         }
     }
 }
@@ -1132,7 +1154,7 @@ static IMP WXOrigViewDidAppear = NULL;
 static void WXHookedViewDidAppear(id self, SEL _cmd, BOOL animated) {
     // 调用原实现
     if (WXOrigViewDidAppear) ((void(*)(id, SEL, BOOL))WXOrigViewDidAppear)(self, _cmd, animated);
-    // v1.3.3: 保存当前聊天 VC 实例（self 即 BaseMsgContentViewController，WXCurrentChatUser 直接用它取 chatContact，不再依赖 WXTopVC 反查）
+    // v1.3.4: 保存当前聊天 VC 实例（self 即 BaseMsgContentViewController，WXCurrentChatUser 直接用它取 chatContact，不再依赖 WXTopVC 反查）
     WXCurChatVC = self;
     // 挂长按手势（幂等）
     @autoreleasepool {
@@ -1175,6 +1197,9 @@ static void WXMenuBgTapped(id self, SEL _cmd, id sender) {
     @autoreleasepool {
         UIViewController *thisVC = (UIViewController *)self;
         [thisVC dismissViewControllerAnimated:YES completion:nil];
+        // v1.3.4: 关闭后延迟隐藏独立窗口（无 block，dispatch_after_f）
+        dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+                         dispatch_get_main_queue(), NULL, (dispatch_function_t)WXHideMenuWindow);
     }
 }
 static NSInteger WXMenuVCSections(id self, SEL _cmd, UITableView *tv) {
@@ -1267,11 +1292,7 @@ static void WXShowPKCMenu(void) {
         UIViewController *menuVC = [[WXMenuVCClass alloc] init];
         [menuVC setModalPresentationStyle:UIModalPresentationOverCurrentContext];
         [menuVC setModalTransitionStyle:UIModalTransitionStyleCrossDissolve];
-        UIViewController *top = WXCurChatVC ?: WXTopVC();
-        // v1.3.3: 若 top 正在 present 其他 VC（微信弹层等），先 dismiss 防 present 静默失败
-        if (top.presentedViewController) {
-            [top dismissViewControllerAnimated:NO completion:nil];
-        }
+        UIViewController *top = WXContainerVC();
         [top presentViewController:menuVC animated:YES completion:nil];
         WXPageOpen = YES;
         WXLog(BJCStr("pkc menu shown, sess=%@"), WXSessName);
@@ -1291,7 +1312,7 @@ static void WXPresentNext(void *ctx) {
             UIViewController *setVC = [[WXSettingsVCClass alloc] init];
             UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:setVC];
             [nav.navigationBar setBarTintColor:WX_THEME_COLOR];
-            UIViewController *top = WXTopVC();
+            UIViewController *top = WXContainerVC();
             [top presentViewController:nav animated:YES completion:nil];
             return;
         }
@@ -1304,7 +1325,7 @@ static void WXPresentNext(void *ctx) {
             objc_registerClassPair(containerCls);
         }
         WXPageVC = [[containerCls alloc] init];
-        UIViewController *top = WXTopVC();
+        UIViewController *top = WXContainerVC();
         [top presentViewController:WXPageVC animated:YES completion:nil];
         WXPageOpen = YES;
     }
@@ -1567,7 +1588,7 @@ static void WXUncaughtExceptionHandler(NSException *exception) {
 %ctor {
     @autoreleasepool {
         NSSetUncaughtExceptionHandler(&WXUncaughtExceptionHandler);
-        NSLog(BJCStr("[wxresearch] dylib loaded v1.3.3 (pkc entry)"));
+        NSLog(BJCStr("[wxresearch] dylib loaded v1.3.4 (pkc entry)"));
         // 初始化联系人缓存
         WXContactCache = [NSMutableDictionary dictionary];
         // 初始化 AI 历史
@@ -1606,9 +1627,9 @@ static void WXUncaughtExceptionHandler(NSException *exception) {
             if (mgr) {
                 NSString *clsName = NSStringFromClass(WXSettingsVCClass);
                 ((void(*)(id, SEL, id, id, id))objc_msgSend)(mgr, sel_registerName("registerControllerWithTitle:version:controller:"),
-                    BJCStr("聊天研究"), BJCStr("v1.3.3"), clsName);
-                WXLog(BJCStr("WCPluginsMgr registered entry: 聊天研究 v1.3.3 -> %@"), clsName);
-                NSLog(BJCStr("[wxresearch] WCPluginsMgr registered: 聊天研究 v1.3.3 -> %@"), clsName);
+                    BJCStr("聊天研究"), BJCStr("v1.3.4"), clsName);
+                WXLog(BJCStr("WCPluginsMgr registered entry: 聊天研究 v1.3.4 -> %@"), clsName);
+                NSLog(BJCStr("[wxresearch] WCPluginsMgr registered: 聊天研究 v1.3.4 -> %@"), clsName);
             } else {
                 WXLog(BJCStr("WARN: WCPluginsMgr sharedInstance returned nil"));
             }

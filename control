@@ -6,4 +6,4 @@ Depends: ellekit
 Maintainer: Hermes
 Section: roothide插件
 Architecture: iphoneos-arm64e
-Version: 1.3.3
+Version: 1.3.4
