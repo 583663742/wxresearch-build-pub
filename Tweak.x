@@ -1250,7 +1250,7 @@ static void WXContainerViewDidLoad(id self, SEL _cmd) {
 // =====================================================================
 // 设置 VC（原生 UITableView：AI 配置 + 总开关 + 版本号）
 // =====================================================================
-static Class WXSettingsVCClass = Nil;
+// （WXSettingsVCClass 定义见文件顶部前置声明区）
 static Class WXSettingsTargetCls = nil;
 static id WXSettingsTarget = nil;
 static UITextField *WXSetURLField = nil;
