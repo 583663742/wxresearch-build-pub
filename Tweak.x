@@ -1,10 +1,10 @@
-// 微信聊天研究 1.2.2 — pkc 式微信内插件（纯原生 UIKit 版）
+// 微信聊天研究 1.2.3 — pkc 式微信内插件（纯原生 UIKit 版）
 // 注入微信进程(com.tencent.xin)，长按+号 → pkc菜单 → 统计/AI分析/聊天记录
 // 原生 UIKit，无悬浮球，零读库直到点击
 // AI 调用走用户自配 API（NSUserDefaults 存储 URL/Key/Model）
 //
 // arm64e 编译限制（全部遵守）：
-//   - 不定义新 ObjC 类（objc_allocateClassPair 动态创建）
+//   - 新 ObjC 类用编译期 @interface/@implementation（pkc 同款写法，v1.2.3 起）
 //   - 不用 %new（class_addMethod）
 //   - 不用 block（dispatch_after_f + C 函数）
 //   - @"..." 一律 BJCStr()
@@ -1353,7 +1353,7 @@ static UITableViewCell *WXSettingsVCCell(id self, SEL _cmd, UITableView *tv, NSI
         } else {
             UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:BJCStr("setCell")];
             [[cell textLabel] setText:BJCStr("版本")];
-            [[cell detailTextLabel] setText:BJCStr("v1.2.2")];
+            [[cell detailTextLabel] setText:BJCStr("v1.2.3")];
             [cell setSelectionStyle:UITableViewCellSelectionStyleNone];
             return cell;
         }
@@ -1362,24 +1362,50 @@ static UITableViewCell *WXSettingsVCCell(id self, SEL _cmd, UITableView *tv, NSI
 static void WXSettingsVCSelect(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
     @autoreleasepool { [tv deselectRowAtIndexPath:ip animated:YES]; }
 }
+// ========== 编译期真实类（pkc 同款写法，替代 objc_allocateClassPair 动态类）==========
+// v1.2.3: 动态类缺 ivar/property 元数据，微信 push 插件 controller 时 KVC 等操作会抛
+// NSUnknownKeyException 闪退；编译期类与 pkc/WeChatPluginHook 完全一致，元数据完整。
+// 方法体直接复用上方 C 函数 IMP（最小改动）。
+@interface WXSettingsVC : UIViewController
+@end
+@implementation WXSettingsVC
+- (void)viewDidLoad {
+    @autoreleasepool {
+        WXLog(BJCStr("[settings] viewDidLoad entered, self=%p"), self);
+        WXSettingsVCViewDidLoad(self, _cmd);
+        WXLog(BJCStr("[settings] viewDidLoad done"));
+    }
+}
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return WXSettingsVCSections(self, _cmd, tv); }
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)sec { return WXSettingsVCRows(self, _cmd, tv, sec); }
+- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)sec { return WXSettingsVCTitle(self, _cmd, tv, sec); }
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip { return WXSettingsVCCell(self, _cmd, tv, ip); }
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip { WXSettingsVCSelect(self, _cmd, tv, ip); }
+@end
 static void WXRegisterSettingsVC(void) {
     if (WXSettingsVCClass) return;
-    WXSettingsVCClass = objc_allocateClassPair([UIViewController class], "WXSettingsVC", 0);
-    class_addMethod(WXSettingsVCClass, sel_registerName("viewDidLoad"), (IMP)WXSettingsVCViewDidLoad, "v@:");
-    class_addMethod(WXSettingsVCClass, sel_registerName("numberOfSectionsInTableView:"), (IMP)WXSettingsVCSections, "l@:@");
-    class_addMethod(WXSettingsVCClass, sel_registerName("tableView:numberOfRowsInSection:"), (IMP)WXSettingsVCRows, "l@:@@:l");
-    class_addMethod(WXSettingsVCClass, sel_registerName("tableView:titleForHeaderInSection:"), (IMP)WXSettingsVCTitle, "@@:@@:l");
-    class_addMethod(WXSettingsVCClass, sel_registerName("tableView:cellForRowAtIndexPath:"), (IMP)WXSettingsVCCell, "@@:@@:@");
-    class_addMethod(WXSettingsVCClass, sel_registerName("tableView:didSelectRowAtIndexPath:"), (IMP)WXSettingsVCSelect, "v@:@@:@");
-    objc_registerClassPair(WXSettingsVCClass);
+    WXSettingsVCClass = [WXSettingsVC class];
+    WXLog(BJCStr("[settings] WXSettingsVC class ready: %@"), NSStringFromClass(WXSettingsVCClass));
 }
 
 // =====================================================================
 // %ctor（v1.2.0：注册 hook，无悬浮球）
 // =====================================================================
+// v1.2.3: 崩溃捕获 —— uncaught exception 写 /tmp/wxr_crash.log + wxresearch.log
+static void WXUncaughtExceptionHandler(NSException *exception) {
+    @autoreleasepool {
+        NSString *desc = [NSString stringWithFormat:@"UNCAUGHT EXCEPTION: %@\nReason: %@\nStack:\n%@",
+                          [exception name], [exception reason],
+                          [[exception callStackSymbols] componentsJoinedByString:@"\n"]];
+        [desc writeToFile:[NSTemporaryDirectory() stringByAppendingPathComponent:BJCStr("wxr_crash.log")]
+               atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        WXLog(desc);
+    }
+}
 %ctor {
     @autoreleasepool {
-        NSLog(BJCStr("[wxresearch] dylib loaded v1.2.0 (pkc entry)"));
+        NSSetUncaughtExceptionHandler(&WXUncaughtExceptionHandler);
+        NSLog(BJCStr("[wxresearch] dylib loaded v1.2.3 (pkc entry)"));
         // 初始化联系人缓存
         WXContactCache = [NSMutableDictionary dictionary];
         // 初始化 AI 历史
@@ -1409,9 +1435,9 @@ static void WXRegisterSettingsVC(void) {
             if (mgr) {
                 NSString *clsName = NSStringFromClass(WXSettingsVCClass);
                 ((void(*)(id, SEL, id, id, id))objc_msgSend)(mgr, sel_registerName("registerControllerWithTitle:version:controller:"),
-                    BJCStr("聊天研究"), BJCStr("v1.2.2"), clsName);
-                WXLog(BJCStr("WCPluginsMgr registered entry: 聊天研究 v1.2.2 -> %@"), clsName);
-                NSLog(BJCStr("[wxresearch] WCPluginsMgr registered: 聊天研究 v1.2.2 -> %@"), clsName);
+                    BJCStr("聊天研究"), BJCStr("v1.2.3"), clsName);
+                WXLog(BJCStr("WCPluginsMgr registered entry: 聊天研究 v1.2.3 -> %@"), clsName);
+                NSLog(BJCStr("[wxresearch] WCPluginsMgr registered: 聊天研究 v1.2.3 -> %@"), clsName);
             } else {
                 WXLog(BJCStr("WARN: WCPluginsMgr sharedInstance returned nil"));
             }
