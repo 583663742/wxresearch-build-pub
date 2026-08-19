@@ -906,6 +906,7 @@ static int WXNextVCMode = 0; // 0=stats, 1=AI, 2=chat, 3=settings
 static Class WXSettingsVCClass = Nil;
 // v1.2.0 fix: 前6个函数前向声明（class_addMethod IMP / dispatch_async_f 回调在定义前使用）
 static void WXSettingsTFDone(id self, SEL _cmd, id sender);
+static void WXSettingsBackTapped(id self, SEL _cmd, id sender); // v1.3.0: 返回按钮（修复黑屏）
 static void WXSettingsSwitchChanged(id self, SEL _cmd, UISwitch *sw);
 static void WXChatReloadUI(void *ctx);
 static void WXStatsReload(void *ctx);
@@ -1354,7 +1355,6 @@ static UITextField *WXSetTempField = nil; // v1.3.0: AI 温度
 static UISwitch *WXSetEnabledSwitch = nil;
 static UISwitch *WXSetEmojiSwitch = nil;   // v1.3.0: 长按表情入口
 static UISwitch *WXSetPlusSwitch = nil;    // v1.3.0: 长按+号入口
-static UISwitch *WXSetRevokeSwitch = nil;  // v1.3.0: 防撤回记录
 // v1.3.0: 当前设置 VC 实例（返回按钮 pop/dismiss 判断用）
 static UIViewController *WXCurSettingsVC = nil;
 
@@ -1418,7 +1418,7 @@ static void WXSettingsBackTapped(id self, SEL _cmd, id sender) {
         }
     }
 }
-// v1.3.0: 开关变化：按 tag 区分存储（100=总开关 101=长按表情 102=长按+号 103=防撤回）
+// v1.3.0: 开关变化：按 tag 区分存储（100=总开关 101=长按表情 102=长按+号）
 static void WXSettingsSwitchChanged(id self, SEL _cmd, UISwitch *sw) {
     @autoreleasepool {
         NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
@@ -1429,9 +1429,6 @@ static void WXSettingsSwitchChanged(id self, SEL _cmd, UISwitch *sw) {
         } else if (tag == 102) {
             [ud setBool:[sw isOn] forKey:BJCStr("wxresearch_entry_plus")];
             WXLog(BJCStr("entry plus=%d"), [sw isOn] ? 1 : 0);
-        } else if (tag == 103) {
-            [ud setBool:[sw isOn] forKey:BJCStr("wxresearch_revoke")];
-            WXLog(BJCStr("revoke record=%d"), [sw isOn] ? 1 : 0);
         } else {
             [ud setBool:[sw isOn] forKey:BJCStr("wxresearch_enabled")];
             WXLog(BJCStr("plugin enabled=%d"), [sw isOn] ? 1 : 0);
@@ -1442,7 +1439,7 @@ static void WXSettingsSwitchChanged(id self, SEL _cmd, UISwitch *sw) {
 static NSInteger WXSettingsVCSections(id self, SEL _cmd, UITableView *tv) { return 3; }
 static NSInteger WXSettingsVCRows(id self, SEL _cmd, UITableView *tv, NSInteger sec) {
     if (sec == 0) return 4; // URL/Key/Model/温度
-    if (sec == 1) return 4; // 总开关/长按表情/长按+号/防撤回
+    if (sec == 1) return 3; // 总开关/长按表情/长按+号（防撤回 v1.4 再做）
     if (sec == 2) return 1; // 版本号
     return 0;
 }
@@ -1479,10 +1476,10 @@ static UITableViewCell *WXSettingsVCCell(id self, SEL _cmd, UITableView *tv, NSI
             [cell.contentView addSubview:tf];
             return cell;
         } else if (sec == 1) {
-            // 通用区：总开关/长按表情/长按+号/防撤回
-            const char *labels[] = {"启用插件", "长按表情按钮", "长按+号按钮", "防撤回记录"};
-            const char *keys[] = {"wxresearch_enabled", "wxresearch_entry_emoji", "wxresearch_entry_plus", "wxresearch_revoke"};
-            NSInteger tags[] = {100, 101, 102, 103};
+            // 通用区：总开关/长按表情/长按+号
+            const char *labels[] = {"启用插件", "长按表情按钮", "长按+号按钮"};
+            const char *keys[] = {"wxresearch_enabled", "wxresearch_entry_emoji", "wxresearch_entry_plus"};
+            NSInteger tags[] = {100, 101, 102};
             UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:BJCStr("setCell")];
             [[cell textLabel] setText:BJCStr(labels[row])];
             UISwitch *sw = [[UISwitch alloc] init];
@@ -1494,8 +1491,7 @@ static UITableViewCell *WXSettingsVCCell(id self, SEL _cmd, UITableView *tv, NSI
             [sw addTarget:WXSettingsTarget action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
             if (row == 0) WXSetEnabledSwitch = sw;
             else if (row == 1) WXSetEmojiSwitch = sw;
-            else if (row == 2) WXSetPlusSwitch = sw;
-            else WXSetRevokeSwitch = sw;
+            else WXSetPlusSwitch = sw;
             [cell setAccessoryView:sw];
             return cell;
         } else {
