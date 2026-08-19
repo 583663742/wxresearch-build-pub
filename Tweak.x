@@ -1,4 +1,4 @@
-// 微信聊天研究 1.3.0 — pkc 式微信内插件（纯原生 UIKit 版）
+// 微信聊天研究 1.3.2 — pkc 式微信内插件（纯原生 UIKit 版）
 // 注入微信进程(com.tencent.xin)，长按+号 → pkc菜单 → 统计/AI分析/聊天记录
 // 原生 UIKit，无悬浮球，零读库直到点击
 // AI 调用走用户自配 API（NSUserDefaults 存储 URL/Key/Model）
@@ -1132,6 +1132,8 @@ static IMP WXOrigViewDidAppear = NULL;
 static void WXHookedViewDidAppear(id self, SEL _cmd, BOOL animated) {
     // 调用原实现
     if (WXOrigViewDidAppear) ((void(*)(id, SEL, BOOL))WXOrigViewDidAppear)(self, _cmd, animated);
+    // v1.3.2: 保存当前聊天 VC 实例（self 即 BaseMsgContentViewController，WXCurrentChatUser 直接用它取 chatContact，不再依赖 WXTopVC 反查）
+    WXCurChatVC = self;
     // 挂长按手势（幂等）
     @autoreleasepool {
         UIView *v = BJ_MSG_SEND0(self, sel_registerName("view"));
@@ -1561,7 +1563,7 @@ static void WXUncaughtExceptionHandler(NSException *exception) {
 %ctor {
     @autoreleasepool {
         NSSetUncaughtExceptionHandler(&WXUncaughtExceptionHandler);
-        NSLog(BJCStr("[wxresearch] dylib loaded v1.3.0 (pkc entry)"));
+        NSLog(BJCStr("[wxresearch] dylib loaded v1.3.2 (pkc entry)"));
         // 初始化联系人缓存
         WXContactCache = [NSMutableDictionary dictionary];
         // 初始化 AI 历史
@@ -1600,9 +1602,9 @@ static void WXUncaughtExceptionHandler(NSException *exception) {
             if (mgr) {
                 NSString *clsName = NSStringFromClass(WXSettingsVCClass);
                 ((void(*)(id, SEL, id, id, id))objc_msgSend)(mgr, sel_registerName("registerControllerWithTitle:version:controller:"),
-                    BJCStr("聊天研究"), BJCStr("v1.3.0"), clsName);
-                WXLog(BJCStr("WCPluginsMgr registered entry: 聊天研究 v1.3.0 -> %@"), clsName);
-                NSLog(BJCStr("[wxresearch] WCPluginsMgr registered: 聊天研究 v1.3.0 -> %@"), clsName);
+                    BJCStr("聊天研究"), BJCStr("v1.3.2"), clsName);
+                WXLog(BJCStr("WCPluginsMgr registered entry: 聊天研究 v1.3.2 -> %@"), clsName);
+                NSLog(BJCStr("[wxresearch] WCPluginsMgr registered: 聊天研究 v1.3.2 -> %@"), clsName);
             } else {
                 WXLog(BJCStr("WARN: WCPluginsMgr sharedInstance returned nil"));
             }
