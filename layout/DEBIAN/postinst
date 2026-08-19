@@ -1,0 +1,32 @@
+#!/bin/bash
+# postinst: ????? .roothidepatch ???roothide ?????
+set -e
+
+# roothide TweakInject ??
+TWEAK_INJECT="/var/jb/usr/lib/TweakInject"
+DYLIB_NAME="wxresearch.dylib"
+PATCH_TARGET="/usr/lib/DynamicPatches/AutoPatches.dylib"
+
+if [ -d "$TWEAK_INJECT" ]; then
+    # ?? .roothidepatch ???? PKCWeChatTools ????????
+    ln -sf "$PATCH_TARGET" "$TWEAK_INJECT/$DYLIB_NAME.roothidepatch"
+    echo "[wxresearch] created .roothidepatch link: $TWEAK_INJECT/$DYLIB_NAME.roothidepatch -> $PATCH_TARGET"
+
+    # ??? DynamicLibraries ????????????
+    DL_DIR="/var/jb/Library/MobileSubstrate/DynamicLibraries"
+    if [ -d "$DL_DIR" ]; then
+        ln -sf "$PATCH_TARGET" "$DL_DIR/$DYLIB_NAME.roothidepatch"
+        echo "[wxresearch] created .roothidepatch link (legacy): $DL_DIR/$DYLIB_NAME.roothidepatch"
+    fi
+else
+    echo "[wxresearch] WARNING: TweakInject directory not found, roothidepatch link not created"
+fi
+
+# ??????? DISABLED ??
+if [ -f "$TWEAK_INJECT/$DYLIB_NAME.DISABLED" ]; then
+    rm -f "$TWEAK_INJECT/$DYLIB_NAME.DISABLED"
+    echo "[wxresearch] removed .DISABLED marker"
+fi
+
+echo "[wxresearch] postinst complete"
+exit 0

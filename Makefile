@@ -1,6 +1,6 @@
-# 微信聊天研究 1.0.1 — pkc 式微信内插件（macOS CI 构建）
-# 注入微信进程(com.tencent.xin)，悬浮球 → 全屏聊天研究页面
-# 会话列表 / 对话气泡 / 搜索 / 按天统计，实时只读微信沙盒 DB
+# 微信聊天研究 1.2.0 — pkc 式微信内插件（macOS CI 构建）
+# 注入微信进程(com.tencent.xin)，长按+号 → pkc菜单 → 统计/AI/聊天记录
+# 纯原生 UIKit，无悬浮球，零读库直到点击
 #
 # 关键约束（biaoji 历史踩坑，勿改）：
 #   1. ARCHS=arm64e：arm64 构建缺 LC_DYLD_CHAINED_FIXUPS → dyld 拒绝加载
@@ -21,6 +21,6 @@ TWEAK_NAME = wxresearch
 
 wxresearch_FILES = Tweak.x
 wxresearch_CFLAGS = -fobjc-arc -Wno-unused-variable -Wno-deprecated-declarations
-wxresearch_LDFLAGS = -lroothide -Wl,-fixup_chains -Wl,-s -framework WebKit -lsqlite3
+wxresearch_LDFLAGS = -lroothide -Wl,-fixup_chains -Wl,-s -lsqlite3
 
 include $(THEOS_MAKE_PATH)/tweak.mk

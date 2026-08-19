@@ -1,0 +1,19 @@
+#!/bin/bash
+# prerm - ???????? TweakInject ?? roothidepatch ?? + ??
+# ???????? ellekit ? "files are corrupted"
+
+set -e
+
+# roothide ??
+TWEAK_INJECT="/var/jb/usr/lib/TweakInject"
+DYLIB_NAME="wxresearch"
+
+# ?? TweakInject ???????
+if [ -d "$TWEAK_INJECT" ]; then
+    rm -f "$TWEAK_INJECT/${DYLIB_NAME}.dylib" 2>/dev/null || true
+    rm -f "$TWEAK_INJECT/${DYLIB_NAME}.plist" 2>/dev/null || true
+    rm -f "$TWEAK_INJECT/${DYLIB_NAME}.dylib.roothidepatch" 2>/dev/null || true
+    rm -f "$TWEAK_INJECT/${DYLIB_NAME}.plist.roothidepatch" 2>/dev/null || true
+fi
+
+exit 0
