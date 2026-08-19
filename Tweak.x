@@ -780,6 +780,11 @@ static NSString *WXFindUsrNameIn(id obj, int depth) {
     return fallback;
 }
 
+// v1.3.1: 最近一次的聊天 VC 实例（hook 时保存，与 pkc 同构直接用 self）
+// 根因修复：之前只传 view 给手势、回调时 WXTopVC() 反查——微信主界面 root 是
+// UITabBarController，WXTopVC 拿不到聊天 VC，导致 chatContact 全部取不到。
+static __weak UIViewController *WXCurChatVC = nil;
+
 static UIViewController *WXTopVC(void) {
     UIWindow *win = nil;
     NSArray *wins = [UIApplication sharedApplication].windows;
@@ -789,6 +794,11 @@ static UIViewController *WXTopVC(void) {
     if (!win && [wins count]) win = wins[0];
     if (!win) return nil;
     UIViewController *top = win.rootViewController;
+    // v1.3.1: 支持 UITabBarController（微信主界面 root 是 tabBar）
+    if ([top isKindOfClass:[UITabBarController class]]) {
+        UITabBarController *tb = (UITabBarController *)top;
+        if (tb.selectedViewController) top = tb.selectedViewController;
+    }
     while (top.presentedViewController) top = top.presentedViewController;
     if ([top isKindOfClass:[UINavigationController class]]) {
         top = [(UINavigationController *)top topViewController];
@@ -812,8 +822,9 @@ static NSString *WXFindLabelTextIn(id view, int depth) {
 }
 
 // v1.2.0: 首选 KVC 取当前会话名，降级用递归找 UILabel
+// v1.3.1: 优先用 hook 时保存的聊天 VC 实例（pkc 同构），WXTopVC() 仅兜底
 static NSString *WXCurrentChatUser(void) {
-    UIViewController *top = WXTopVC();
+    UIViewController *top = WXCurChatVC ?: WXTopVC();
     if (!top) return nil;
 
     // 首选：KVC 直接从 VC 取 chatContact
@@ -845,8 +856,9 @@ static NSString *WXCurrentChatUser(void) {
 }
 
 // v1.2.0: 从当前 VC 取会话显示名（KVC + 降级导航栏标题）
+// v1.3.1: 优先用 hook 时保存的聊天 VC 实例
 static NSString *WXCurrentChatName(void) {
-    UIViewController *top = WXTopVC();
+    UIViewController *top = WXCurChatVC ?: WXTopVC();
     if (!top) return nil;
     @try {
         id contact = [top valueForKey:BJCStr("chatContact")];
