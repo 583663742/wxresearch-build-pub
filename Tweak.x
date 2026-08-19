@@ -1,4 +1,4 @@
-// 微信聊天研究 1.1.0 — pkc 式微信内插件
+// 微信聊天研究 1.1.3 — pkc 式微信内插件
 // 注入微信进程(com.tencent.xin)，右下角悬浮球 → 全屏研究页面
 // 会话列表 / 对话气泡 / 搜索 / 按天统计 / AI研究模式(选人+时间段→DeepSeek分析讨论)
 // 实时只读微信沙盒 DB，AI 调用走 DeepSeek API(用户自配 key)
@@ -240,14 +240,17 @@ static id WXJSONSafe(id obj) {
 // ============ sqlite 只读查询 → NSArray/NSDictionary ============
 static sqlite3 *WXOpenRO(NSString *path) {
     sqlite3 *db = NULL;
-    if (sqlite3_open_v2([path UTF8String], &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK)
+    if (sqlite3_open_v2([path UTF8String], &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK) {
+        // 微信自身 WCDB 持有写连接：只读查询可能撞 SQLITE_BUSY，等 3 秒避免查询失败
+        sqlite3_busy_timeout(db, 3000);
         return db;
+    }
     if (db) sqlite3_close(db);
     return NULL;
 }
 
-static NSArray *WXQuery(NSString *dbPath, NSString *sql, int limit) {
-    sqlite3 *db = WXOpenRO(dbPath);
+// 核心查询（用已打开的连接执行，供复用连接场景；外部负责 open/close）
+static NSArray *WXQueryOn(sqlite3 *db, NSString *sql, int limit) {
     if (!db) return @[];
     NSMutableArray *rows = [NSMutableArray array];
     sqlite3_stmt *stmt = NULL;
@@ -293,6 +296,14 @@ static NSArray *WXQuery(NSString *dbPath, NSString *sql, int limit) {
         }
         sqlite3_finalize(stmt);
     }
+    return rows;
+}
+
+// 便捷封装：打开→查询→关闭（单次查询，每次一个连接）
+static NSArray *WXQuery(NSString *dbPath, NSString *sql, int limit) {
+    sqlite3 *db = WXOpenRO(dbPath);
+    if (!db) return @[];
+    NSArray *rows = WXQueryOn(db, sql, limit);
     sqlite3_close(db);
     return rows;
 }
@@ -347,33 +358,43 @@ static NSString *WXContactName(NSString *usrName) {
 // ============ 会话列表 ============
 // 遍历所有 message_*.sqlite 的 Chat_<md5> 表（排除 ChatExt2_ 扩展表）→ md5 反查 UsrName → 显示名
 // 轻量化：只查 MAX(CreateTime)（不查 COUNT），按最近时间倒序取前 300 个
+// 性能修复(v1.1.3)：每个 DB 只打开一次连接（WXQueryOn 复用），不再每张表开关连接；
+//   表总量超 400 截断，避免极端大库长时间扫描
 static NSArray *WXListSessions(void) {
     NSMutableArray *sessions = [NSMutableArray array];
     NSString *dbDir = WXFindDBDir();
     if (!dbDir) return sessions;
-    NSString *mm = [dbDir stringByAppendingPathComponent:BJCStr("MM.sqlite")];
-    // 一次性查全部联系人：md5→userName 映射 + 显示名（备注优先）缓存
+    // 一次性查全部联系人：md5→userName 映射 + 显示名（备注优先）缓存（单连接）
     NSMutableDictionary *md5ToUser = [NSMutableDictionary dictionary];
     NSMutableDictionary *nameByUser = [NSMutableDictionary dictionary];
     NSString *wc = [dbDir stringByAppendingPathComponent:BJCStr("WCDB_Contact.sqlite")];
-    NSArray *friends = WXQuery(wc, BJCStr("SELECT userName, dbContactRemark FROM Friend"), 0);
-    for (NSDictionary *f in friends) {
-        NSString *u = f[BJCStr("userName")];
-        if (![u length]) continue;
-        md5ToUser[[WXMD5(u) lowercaseString]] = u;
-        NSString *rm = WXProtoField1Str(f[BJCStr("dbContactRemark")]);
-        if ([rm length]) nameByUser[u] = rm;
+    sqlite3 *wcDb = WXOpenRO(wc);
+    if (wcDb) {
+        NSArray *friends = WXQueryOn(wcDb, BJCStr("SELECT userName, dbContactRemark FROM Friend"), 0);
+        for (NSDictionary *f in friends) {
+            NSString *u = f[BJCStr("userName")];
+            if (![u length]) continue;
+            md5ToUser[[WXMD5(u) lowercaseString]] = u;
+            NSString *rm = WXProtoField1Str(f[BJCStr("dbContactRemark")]);
+            if ([rm length]) nameByUser[u] = rm;
+        }
+        sqlite3_close(wcDb);
     }
     NSArray *dbs = WXFindMsgDBs();
+    int tableScan = 0; // 表太多截断，避免极端情况长时间扫描
     for (NSString *db in dbs) {
+        sqlite3 *dbh = WXOpenRO(db);
+        if (!dbh) continue;
         // substr(name,1,5)='Chat_' 精确匹配，排除 ChatExt2_ 等扩展表
-        NSArray *tabs = WXQuery(db, BJCStr("SELECT name FROM sqlite_master WHERE type='table' AND substr(name,1,5)='Chat_'"), 0);
+        NSArray *tabs = WXQueryOn(dbh, BJCStr("SELECT name FROM sqlite_master WHERE type='table' AND substr(name,1,5)='Chat_'"), 0);
         for (NSDictionary *t in tabs) {
+            if (tableScan >= 400) break; // 400 张表足够（最终列表只留 300）
+            tableScan++;
             NSString *tab = t[BJCStr("name")];
             NSString *key = [tab substringFromIndex:5]; // 去掉 Chat_
             NSString *usrName = md5ToUser[key];
             NSString *display = usrName ? (nameByUser[usrName] ?: (([usrName hasSuffix:BJCStr("@chatroom")] && [usrName length] > 12) ? [NSString stringWithFormat:BJCStr("群[%@…]"), [usrName substringToIndex:8]] : usrName)) : ([key length] >= 8 ? [NSString stringWithFormat:BJCStr("%@…"), [key substringToIndex:8]] : key);
-            NSArray *info = WXQuery(db, [NSString stringWithFormat:BJCStr("SELECT CreateTime AS last FROM %@ ORDER BY MesLocalID DESC LIMIT 1"), tab], 1);
+            NSArray *info = WXQueryOn(dbh, [NSString stringWithFormat:BJCStr("SELECT CreateTime AS last FROM %@ ORDER BY MesLocalID DESC LIMIT 1"), tab], 1);
             long long last = 0;
             if ([info count]) {
                 last = [info[0][BJCStr("last")] longLongValue];
@@ -386,6 +407,8 @@ static NSArray *WXListSessions(void) {
             s[BJCStr("lastTime")] = @(last);
             [sessions addObject:s];
         }
+        sqlite3_close(dbh);
+        if (tableScan >= 400) break;
     }
     // 按最后时间倒序，取最近 300 个（列表轻量）
     [sessions sortUsingComparator:^NSComparisonResult(id a, id b) {
@@ -1233,6 +1256,134 @@ static NSString *WXPageHTML(void) {
 }
 
 // ============ JS 桥（动态类，WKScriptMessageHandler） ============
+// ================================================================
+// 异步 DB 查询（v1.1.3 根治：JS 桥回调默认跑微信主线程，DB 查询全部移后台）
+// 流程：主线程收 JS 请求 → 打包丢后台队列 → 后台查库+JSON序列化 → 主线程回调 JS
+// JS 侧 window.__cb(rid, json) 接口不变，前端零改动
+// ================================================================
+static void WXAsyncReply(void *ctx) {
+    @autoreleasepool {
+        NSDictionary *reply = (__bridge_transfer NSDictionary *)ctx;
+        long long rid = [reply[BJCStr("rid")] longLongValue];
+        NSString *jsonStr = reply[BJCStr("json")] ?: @"";
+        BOOL ok = [reply[BJCStr("ok")] boolValue];
+        if (!ok) {
+            WXLog(BJCStr("bg JSON FAIL rid=%lld err=%@"), rid, reply[BJCStr("err")] ?: @"");
+            return;
+        }
+        WXLog(BJCStr("bg reply rid=%lld jsonLen=%lu"), rid, (unsigned long)[jsonStr length]);
+        UIView *v = BJ_MSG_SEND0(WXPageVC, sel_registerName("view"));
+        for (UIView *sub in [v subviews]) {
+            if ([sub isKindOfClass:[WKWebView class]]) {
+                WKWebView *web = (WKWebView *)sub;
+                [web evaluateJavaScript:[NSString stringWithFormat:BJCStr("window.__cb(%lld, '%@');"), rid, WXJSEscape(jsonStr)] completionHandler:nil];
+                break;
+            }
+        }
+    }
+}
+
+// 后台线程：执行查询 + JSON 序列化（纯计算，无 UI 依赖）
+static void WXAsyncQueryMain(void *ctx) {
+    @autoreleasepool {
+        NSArray *params = (__bridge_transfer NSArray *)ctx;
+        if ([params count] < 6) return;
+        NSString *action = params[0];
+        NSString *p1 = params[1];
+        NSString *p2 = params[2];
+        NSString *p3 = params[3];
+        long long p4 = [params[4] longLongValue];
+        long long rid = [params[5] longLongValue];
+        WXLog(BJCStr("bg action=%@ rid=%lld"), action, rid);
+        NSArray *result = @[];
+        if ([action isEqualToString:BJCStr("sessions")]) {
+            NSArray *sess = WXListSessions();
+            NSMutableArray *out = [NSMutableArray array];
+            for (NSDictionary *s in sess) {
+                NSMutableDictionary *m = [NSMutableDictionary dictionaryWithDictionary:s];
+                m[BJCStr("firstChar")] = [m[BJCStr("name")] length] ? [m[BJCStr("name")] substringToIndex:1] : BJCStr("?");
+                [out addObject:m];
+            }
+            result = out;
+        } else if ([action isEqualToString:BJCStr("search_sessions")]) {
+            result = WXSearchSessions(p1);
+        } else if ([action isEqualToString:BJCStr("messages")]) {
+            // p1=db p2=table p3=offset 或 "offset|startTs|endTs" p4=limit
+            int offset = (int)p3.intValue;
+            long long rStart = 0, rEnd = 0;
+            if ([p3 rangeOfString:BJCStr("|")].location != NSNotFound) {
+                NSArray *pp = [p3 componentsSeparatedByString:BJCStr("|")];
+                offset = (int)[pp[0] intValue];
+                if ([pp count] >= 3) {
+                    rStart = [pp[1] longLongValue];
+                    rEnd = [pp[2] longLongValue];
+                }
+            }
+            if (rStart > 0 && rEnd > rStart) {
+                result = WXFetchMessagesRangeDB(p1, p2, rStart, rEnd, offset, (int)p4);
+            } else {
+                result = WXFetchMessages(p1, p2, offset, (int)p4);
+            }
+        } else if ([action isEqualToString:BJCStr("search")]) {
+            result = WXSearchMessages(p1, p2, p3, (int)p4);
+        } else if ([action isEqualToString:BJCStr("stats")]) {
+            result = WXStatsByDay(p1, p2, (int)p4 ?: 30);
+        } else if ([action isEqualToString:BJCStr("stats_detail")]) {
+            result = WXStatsDetail(p1, p2, (long long)p3.longLongValue, p4);
+        } else if ([action isEqualToString:BJCStr("group_rank")]) {
+            result = WXGroupRank(p1, p2, (long long)p3.longLongValue, p4);
+        } else if ([action isEqualToString:BJCStr("ai_test")]) {
+            // 同步网络请求(20s 超时)，必须后台执行
+            NSMutableArray *res = [NSMutableArray array];
+            NSArray *tests = @[
+                @{@"name":BJCStr("DeepSeek"), @"model":BJCStr("deepseek-chat"), @"url":BJCStr("https://api.deepseek.com/chat/completions"), @"key":BJCStr(WXDEEPSEEKKEY)}
+            ];
+            NSArray *ping = @[@{BJCStr("role"):BJCStr("user"), BJCStr("content"):BJCStr("hi")}];
+            for (NSDictionary *t in tests) {
+                NSMutableDictionary *r = [NSMutableDictionary dictionaryWithDictionary:t];
+                r[BJCStr("key")] = BJCStr("***");
+                NSString *resp = WXAIRequestURL(t[BJCStr("url")], t[BJCStr("key")], t[BJCStr("model")], ping, 20);
+                NSString *content = WXAIExtractContent(resp);
+                if ([content length]) {
+                    r[BJCStr("ok")] = @YES;
+                    r[BJCStr("ms")] = BJCStr("正常");
+                    r[BJCStr("reply")] = [content length] > 40 ? [content substringToIndex:40] : content;
+                } else {
+                    r[BJCStr("ok")] = @NO;
+                    r[BJCStr("ms")] = BJCStr("失败");
+                    r[BJCStr("reply")] = BJCStr("无响应（key无效/限流/网络）");
+                }
+                [res addObject:r];
+            }
+            result = @[@{BJCStr("results"):res}];
+        }
+        // JSON 序列化放后台完成（WXJSONSafe 纯计算），主线程只做 evaluateJavaScript
+        NSError *jerr = nil;
+        NSData *json = [NSJSONSerialization dataWithJSONObject:WXJSONSafe(result) options:0 error:&jerr];
+        NSString *jsonStr = nil;
+        if (json) jsonStr = [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
+        NSMutableDictionary *reply = [NSMutableDictionary dictionary];
+        reply[BJCStr("rid")] = @(rid);
+        reply[BJCStr("ok")] = @(jsonStr != nil);
+        reply[BJCStr("json")] = jsonStr ?: @"";
+        if (jerr) reply[BJCStr("err")] = [jerr description];
+        dispatch_async_f(dispatch_get_main_queue(), (void *)CFBridgingRetain(reply), (dispatch_function_t)WXAsyncReply);
+    }
+}
+
+// 主线程入口：DB/网络类 action 丢后台执行（回调仍走 window.__cb）
+static void WXDispatchAsync(NSString *action, NSString *p1, NSString *p2, NSString *p3, long long p4, long long rid) {
+    NSMutableArray *params = [NSMutableArray array];
+    [params addObject:action ?: @""];
+    [params addObject:p1 ?: @""];
+    [params addObject:p2 ?: @""];
+    [params addObject:p3 ?: @""];
+    [params addObject:@(p4)];
+    [params addObject:@(rid)];
+    dispatch_async_f(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0),
+                     (void *)CFBridgingRetain(params), (dispatch_function_t)WXAsyncQueryMain);
+}
+
 static void WXOnScriptMessage(id self, SEL _cmd, WKUserContentController *uc, WKScriptMessage *msg) {
     @autoreleasepool {
         NSDictionary *body = [msg body];
@@ -1253,16 +1404,12 @@ static void WXOnScriptMessage(id self, SEL _cmd, WKUserContentController *uc, WK
         if ([action isEqualToString:BJCStr("jsdebug")]) {
             WXLog(BJCStr("JS上报: %@"), p1);
         } else if ([action isEqualToString:BJCStr("sessions")]) {
-            NSArray *sess = WXListSessions();
-            NSMutableArray *out = [NSMutableArray array];
-            for (NSDictionary *s in sess) {
-                NSMutableDictionary *m = [NSMutableDictionary dictionaryWithDictionary:s];
-                m[BJCStr("firstChar")] = [m[BJCStr("name")] length] ? [m[BJCStr("name")] substringToIndex:1] : BJCStr("?");
-                [out addObject:m];
-            }
-            result = out;
+            // v1.1.3: DB 查询移后台线程，避免主线程卡死微信
+            WXDispatchAsync(action, p1, p2, p3, p4, rid);
+            return;
         } else if ([action isEqualToString:BJCStr("search_sessions")]) {
-            result = WXSearchSessions(p1);
+            WXDispatchAsync(action, p1, p2, p3, p4, rid);
+            return;
         } else if ([action isEqualToString:BJCStr("current_chat")]) {
             // 当前聊天会话信息（入口探测已写入 WXCurrentChatUsr）
             NSMutableDictionary *d = [NSMutableDictionary dictionary];
@@ -1291,32 +1438,23 @@ static void WXOnScriptMessage(id self, SEL _cmd, WKUserContentController *uc, WK
             }
             result = @[d];
         } else if ([action isEqualToString:BJCStr("messages")]) {
-            // p1=db p2=table p3=offset p4=limit；时间段过滤：p3 传 "offset|startTs|endTs"
-            int offset = (int)p3.intValue;
-            long long rStart = 0, rEnd = 0;
-            if ([p3 rangeOfString:BJCStr("|")].location != NSNotFound) {
-                NSArray *pp = [p3 componentsSeparatedByString:BJCStr("|")];
-                offset = (int)[pp[0] intValue];
-                if ([pp count] >= 3) {
-                    rStart = [pp[1] longLongValue];
-                    rEnd = [pp[2] longLongValue];
-                }
-            }
-            if (rStart > 0 && rEnd > rStart) {
-                result = WXFetchMessagesRangeDB(p1, p2, rStart, rEnd, offset, (int)p4);
-            } else {
-                result = WXFetchMessages(p1, p2, offset, (int)p4);
-            }
+            // v1.1.3: DB 查询移后台线程
+            WXDispatchAsync(action, p1, p2, p3, p4, rid);
+            return;
         } else if ([action isEqualToString:BJCStr("search")]) {
-            result = WXSearchMessages(p1, p2, p3, (int)p4);
+            WXDispatchAsync(action, p1, p2, p3, p4, rid);
+            return;
         } else if ([action isEqualToString:BJCStr("stats")]) {
-            result = WXStatsByDay(p1, p2, (int)p4 ?: 30);
+            WXDispatchAsync(action, p1, p2, p3, p4, rid);
+            return;
         } else if ([action isEqualToString:BJCStr("stats_detail")]) {
             // p1=db p2=table p3=startTs p4=endTs
-            result = WXStatsDetail(p1, p2, (long long)p3.longLongValue, p4);
+            WXDispatchAsync(action, p1, p2, p3, p4, rid);
+            return;
         } else if ([action isEqualToString:BJCStr("group_rank")]) {
             // p1=db p2=table p3=startTs p4=endTs
-            result = WXGroupRank(p1, p2, (long long)p3.longLongValue, p4);
+            WXDispatchAsync(action, p1, p2, p3, p4, rid);
+            return;
         } else if ([action isEqualToString:BJCStr("copy_text")]) {
             // p1=要复制的文本
             WXCopyText(p1);
@@ -1369,29 +1507,9 @@ static void WXOnScriptMessage(id self, SEL _cmd, WKUserContentController *uc, WK
                 @{@"name":BJCStr("DeepSeek"), @"model":BJCStr("deepseek-chat"), @"url":BJCStr("api.deepseek.com"), @"free":@NO, @"ok":@YES, @"desc":BJCStr("唯一AI模型（deepseek-chat）")}
             ], BJCStr("note"):BJCStr("DeepSeek deepseek-chat，按用量计费")}];
         } else if ([action isEqualToString:BJCStr("ai_test")]) {
-            // 逐模型连通测试：最小请求 ping
-            NSMutableArray *res = [NSMutableArray array];
-            NSArray *tests = @[
-                @{@"name":BJCStr("DeepSeek"), @"model":BJCStr("deepseek-chat"), @"url":BJCStr("https://api.deepseek.com/chat/completions"), @"key":BJCStr(WXDEEPSEEKKEY)}
-            ];
-            NSArray *ping = @[@{BJCStr("role"):BJCStr("user"), BJCStr("content"):BJCStr("hi")}];
-            for (NSDictionary *t in tests) {
-                NSMutableDictionary *r = [NSMutableDictionary dictionaryWithDictionary:t];
-                r[BJCStr("key")] = BJCStr("***");
-                NSString *resp = WXAIRequestURL(t[BJCStr("url")], t[BJCStr("key")], t[BJCStr("model")], ping, 20);
-                NSString *content = WXAIExtractContent(resp);
-                if ([content length]) {
-                    r[BJCStr("ok")] = @YES;
-                    r[BJCStr("ms")] = BJCStr("正常");
-                    r[BJCStr("reply")] = [content length] > 40 ? [content substringToIndex:40] : content;
-                } else {
-                    r[BJCStr("ok")] = @NO;
-                    r[BJCStr("ms")] = BJCStr("失败");
-                    r[BJCStr("reply")] = BJCStr("无响应（key无效/限流/网络）");
-                }
-                [res addObject:r];
-            }
-            result = @[@{BJCStr("results"):res}];
+            // v1.1.3: 同步网络请求(20s 超时)移后台线程，避免卡死主线程
+            WXDispatchAsync(action, p1, p2, p3, p4, rid);
+            return;
         } else if ([action isEqualToString:BJCStr("close")]) {
             UIViewController *top = WXTopVC();
             if (!top) return;
@@ -1422,6 +1540,16 @@ static void WXOnScriptMessage(id self, SEL _cmd, WKUserContentController *uc, WK
 }
 
 // ============ 页面 VC（动态类） ============
+// v1.1.3: 页面被手势下滑/其他方式关闭时复位状态，防止 WXPageOpen 失步
+static void WXPageViewWillDisappear(id self, SEL _cmd) {
+    @autoreleasepool {
+        if (WXPageOpen) {
+            WXPageOpen = NO;
+            WXLog(BJCStr("page disappeared, WXPageOpen reset"));
+        }
+    }
+}
+
 static void WXPageViewDidLoad(id self, SEL _cmd) {
     @autoreleasepool {
         UIView *v = BJ_MSG_SEND0(self, sel_registerName("view"));
@@ -1469,8 +1597,12 @@ static void WXBallPan(id self, SEL _cmd, UIPanGestureRecognizer *gr) {
             CGFloat x = (f.origin.x + f.size.width / 2) < w / 2 ? 8 : w - f.size.width - 8;
             CGFloat y = f.origin.y;
             if (y < 88) y = 88;
-            if (y > h - f.size.height - 48) y = h - f.size.height - 48;
+            // v1.1.3: 下限抬高，球底边不进底部输入区（聊天页输入条/表情/加号区域）
+            if (y > h - f.size.height - 110) y = h - f.size.height - 110;
             [ball setFrame:CGRectMake(x, y, f.size.width, f.size.height)];
+            // 记忆位置：下次启动恢复（v1.1.3）
+            [[NSUserDefaults standardUserDefaults] setObject:[NSString stringWithFormat:BJCStr("%.1f,%.1f"), x, y] forKey:BJCStr("wxresearch_ball_xy")];
+            [[NSUserDefaults standardUserDefaults] synchronize];
         }
     }
 }
@@ -1597,6 +1729,8 @@ static void WXBallTapped(id self, SEL _cmd, id sender) {
         if (!WXPageVC) {
             Class vcCls = objc_allocateClassPair([UIViewController class], "WXResearchPageVC", 0);
             class_addMethod(vcCls, sel_registerName("viewDidLoad"), (IMP)WXPageViewDidLoad, "v@:");
+            // v1.1.3: 页面被手势下滑/其他方式关闭时复位状态，防止 WXPageOpen 失步
+            class_addMethod(vcCls, sel_registerName("viewWillDisappear:"), (IMP)WXPageViewWillDisappear, "v@:");
             objc_registerClassPair(vcCls);
             WXPageVC = [[vcCls alloc] init];
         }
@@ -1632,7 +1766,21 @@ static void WXInstallBall(void *ctx) {
         UIButton *ball = [UIButton buttonWithType:UIButtonTypeCustom];
         [ball setTag:92001];
         CGRect b = win.bounds;
-        [ball setFrame:CGRectMake(b.size.width - 76, b.size.height - 160, 56, 56)];
+        // v1.1.3: 默认右侧中部，避开底部输入区（输入条/表情/加号）；拖拽过则恢复记忆位置
+        CGFloat bx = b.size.width - 76;
+        CGFloat by = b.size.height * 0.40;
+        NSString *savedXY = [[NSUserDefaults standardUserDefaults] stringForKey:BJCStr("wxresearch_ball_xy")];
+        if ([savedXY length]) {
+            NSArray *xy = [savedXY componentsSeparatedByString:BJCStr(",")];
+            if ([xy count] == 2) {
+                CGFloat sx = [xy[0] doubleValue];
+                CGFloat sy = [xy[1] doubleValue];
+                if (sx > 4 && sx < b.size.width - 60 && sy > 88 && sy < b.size.height - 166) {
+                    bx = sx; by = sy;
+                }
+            }
+        }
+        [ball setFrame:CGRectMake(bx, by, 56, 56)];
         [ball setBackgroundColor:[UIColor colorWithRed:0.03 green:0.76 blue:0.38 alpha:0.92]];
         [ball.layer setCornerRadius:28];
         [ball setTitle:BJCStr("研") forState:UIControlStateNormal];
@@ -1711,13 +1859,13 @@ static void __attribute__((unused)) WXEnsureAIVCLoaded(void) {
 %ctor {
     // 🔴 第 1 行必须是无 ObjC 依赖的纯 C 文件写入
     // （如果 %ctor 之后崩了也能看到 ctor_enter；连这行都没 = dyld 在 bind/rebase 阶段就崩了）
-    WX_C_ctor_footprint("ctor_enter_v1.1.2");
+    WX_C_ctor_footprint("ctor_enter_v1.1.3");
     // ============ 任何 objc_getClass / objc_allocateClassPair 绝对不能放在这之前！========
 
-    NSLog(BJCStr("[wxresearch] dylib loaded (v1.1.2), installing ball"));
+    NSLog(BJCStr("[wxresearch] dylib loaded (v1.1.3), installing ball"));
     WX_C_ctor_footprint("ctor_nslog_ok");
 
-    WXLog(BJCStr("dylib loaded (v1.1.2)"));
+    WXLog(BJCStr("dylib loaded (v1.1.3)"));
     WX_C_ctor_footprint("ctor_wxlog_ok");
 
     dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
