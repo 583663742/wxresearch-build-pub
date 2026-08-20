@@ -312,9 +312,11 @@ static NSArray *WXFetchMessages(NSString *db, NSString *table, int offset, int l
 
 // ============ 消息搜索 ============
 static NSArray *WXSearchMessages(NSString *db, NSString *table, NSString *kw, int limit) {
+    // 转义单引号，避免关键词含 ' 时破坏 SQL（table 来自 MD5，安全）
+    NSString *esc = [kw stringByReplacingOccurrencesOfString:BJCStr("'") withString:BJCStr("''")];
     NSString *sql = [NSString stringWithFormat:BJCStr(
         "SELECT MesLocalID, CreateTime, Type, Message FROM %@ WHERE Message LIKE '%%%@%%' ORDER BY MesLocalID DESC LIMIT %d"),
-        table, kw, limit];
+        table, esc, limit];
     return WXQuery(db, sql, 0);
 }
 
@@ -536,7 +538,11 @@ static void WXAIResearchMain(void *ctx) {
         NSString *content = WXAIExtractContent(respJson);
         
         if (content) {
-            [WXAIHistory addObject:@{BJCStr("role"): BJCStr("user"), BJCStr("content"): userQuestion ?: BJCStr("分析这段聊天")}];
+            // 仅当确实带了用户问题时才记入 user 轮次；点"开始分析"（无追问）时请求只含 system，
+            // 不应编造一条从未真正发送的 user 消息，否则后续追问会把这条假消息一并发给 AI
+            if ([userQuestion length]) {
+                [WXAIHistory addObject:@{BJCStr("role"): BJCStr("user"), BJCStr("content"): userQuestion}];
+            }
             [WXAIHistory addObject:@{BJCStr("role"): BJCStr("assistant"), BJCStr("content"): content}];
         }
         
@@ -1336,6 +1342,20 @@ static void WXShowPKCMenu(void) {
         WXASIdx[1] = ((long long(*)(id, SEL, id))objc_msgSend)(sheet, sel_registerName("addButtonWithTitle:"), BJCStr("🤖 AI 分析"));
         WXASIdx[2] = ((long long(*)(id, SEL, id))objc_msgSend)(sheet, sel_registerName("addButtonWithTitle:"), BJCStr("💬 聊天记录"));
         WXASIdx[3] = ((long long(*)(id, SEL, id))objc_msgSend)(sheet, sel_registerName("addButtonWithTitle:"), BJCStr("⚙️ 设置"));
+        // 必须显式 show，WCActionSheet 不会在 init 后自动弹出（pkc 同款）。无 block/纯 msgSend。
+        if ([sheet respondsToSelector:@selector(show)]) {
+            ((void(*)(id, SEL))objc_msgSend)(sheet, sel_registerName("show"));
+        } else {
+            UIWindow *kw = [UIApplication sharedApplication].keyWindow;
+            if (!kw && [[UIApplication sharedApplication].windows count]) kw = [UIApplication sharedApplication].windows[0];
+            if (kw && [sheet respondsToSelector:@selector(showInView:)]) {
+                ((void(*)(id, SEL, id))objc_msgSend)(sheet, sel_registerName("showInView:"), kw);
+            } else if (kw && [sheet respondsToSelector:@selector(showInWindow:)]) {
+                ((void(*)(id, SEL, id))objc_msgSend)(sheet, sel_registerName("showInWindow:"), kw);
+            } else {
+                WXLog(BJCStr("FATAL: WCActionSheet 无可用 show 方法，菜单无法弹出"));
+            }
+        }
         WXPageOpen = YES;
         WXLog(BJCStr("pkc menu shown via WCActionSheet, sess=%@ idx=%lld/%lld/%lld/%lld"),
               WXSessName, WXASIdx[0], WXASIdx[1], WXASIdx[2], WXASIdx[3]);
@@ -1702,6 +1722,7 @@ static BOOL WXChatLoading = NO;
 static BOOL WXChatAllLoaded = NO;
 static BOOL WXChatSearchMode = NO;
 static NSMutableArray *WXChatSearchResult = nil;
+static BOOL WXChatDidInitialScroll = NO; // 首次加载后滚到底部显示最新消息；切范围/重载时重置
 
 // ========== Sheet 管理（底部弹出菜单用）==========
 static UIView *WXSheetMask = nil;
@@ -2072,8 +2093,31 @@ static void WXChatReloadUI(void *ctx) {
         if (!WXChatVCInstance) return;
         UIView *v = BJ_MSG_SEND0(WXChatVCInstance, sel_registerName("view"));
         for (UIView *s in v.subviews) {
-            if ([s isKindOfClass:[UITableView class]]) {
-                [(UITableView *)s reloadData];
+            if (![s isKindOfClass:[UITableView class]]) continue;
+            UITableView *tv = (UITableView *)s;
+            // 顶部插入更老消息时 reloadData 会让 contentOffset 跳到顶部，保存尺寸/偏移以补偿
+            BOOL preserve = WXChatDidInitialScroll && !WXChatSearchMode;
+            CGFloat oldSize = 0, oldOffset = 0;
+            if (preserve) { oldSize = tv.contentSize.height; oldOffset = tv.contentOffset.y; }
+            [tv reloadData];
+            [tv layoutIfNeeded];
+            if (!WXChatDidInitialScroll && !WXChatSearchMode && [WXChatDisplay count] > 0) {
+                // 首次加载：滚到底部，让用户直接看到最新消息（而非最旧的）
+                NSInteger total = [tv numberOfRowsInSection:0];
+                if (total > 0) {
+                    NSIndexPath *p = [NSIndexPath indexPathForRow:total - 1 inSection:0];
+                    [tv scrollToRowAtIndexPath:p atScrollPosition:UITableViewScrollPositionBottom animated:NO];
+                }
+                WXChatDidInitialScroll = YES;
+            } else if (preserve) {
+                // 后续顶部加载：新增高度补偿，保持原视觉位置不跳
+                CGFloat newSize = tv.contentSize.height;
+                CGFloat delta = newSize - oldSize;
+                if (delta > 0.5) {
+                    CGPoint off = tv.contentOffset;
+                    off.y += delta;
+                    tv.contentOffset = off;
+                }
             }
         }
     }
@@ -2091,6 +2135,7 @@ static void WXChatApplyRange(WXRangeType type, long long s, long long e) {
         WXChatMsgs = nil; WXChatDisplay = nil;
         WXChatOffset = 0; WXChatAllLoaded = NO;
         WXChatSearchMode = NO; WXChatSearchResult = nil;
+        WXChatDidInitialScroll = NO; // 切范围重新加载，需要再次滚到底
         WXChatReloadUI(NULL);
         dispatch_async_f(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0),
                          NULL, (dispatch_function_t)WXChatLoadMoreBG);
@@ -2220,6 +2265,7 @@ static void WXChatVCViewDidLoad(id self, SEL _cmd) {
         // 初始加载
         WXChatMsgs = nil; WXChatDisplay = nil;
         WXChatOffset = 0; WXChatAllLoaded = NO;
+        WXChatDidInitialScroll = NO;
         dispatch_async_f(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0),
                          NULL, (dispatch_function_t)WXChatLoadMoreBG);
     }

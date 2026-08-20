@@ -1,4 +1,4 @@
-# wxresearch 1.1.0 macOS 原生构建（pkc 式微信聊天研究插件）
+# wxresearch 1.3.5 macOS 原生构建（pkc 式微信聊天研究插件）
 # 触发：push 或手动 workflow_dispatch
 # 安全：仓库只存占位符版 Tweak.x，构建时用 GitHub Secrets 注入真实 key
 name: Build wxresearch
