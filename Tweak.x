@@ -1295,6 +1295,24 @@ static long long WXASIdx[4] = {-1, -1, -1, -1}; // 统计/AI/聊天记录/设置
 static void WXActionSheetClicked(id self, SEL _cmd, id sheet, long long idx) {
     @autoreleasepool {
         WXLog(BJCStr("actionSheet clicked idx=%lld"), idx);
+        // 微信 WCActionSheet 取消按钮处理（双重防护）：
+        // GitHub class-dump 头文件（掘金「给微信聊天记录添加截图功能」）仅摘录了
+        // buttonTitleList / showInView: / addButtonWithTitle: 等方法，未完整列出
+        // cancelButtonIndex，故该属性未必存在，需兜底：
+        //   1) 若 sheet 响应 cancelButtonIndex，按其返回值判断取消；
+        //   2) 兜底：本菜单 cancelButtonTitle 在 init 中最先加入（index 0，无
+        //      destructive/otherButtonTitles），4 个功能按钮由 addButtonWithTitle:
+        //      在 init 之后追加（index 1..4），故 idx==0 即取消按钮，跳过。
+        if ([sheet respondsToSelector:@selector(cancelButtonIndex)]) {
+            long long cancelIdx = ((long long(*)(id, SEL))objc_msgSend)(sheet, sel_registerName("cancelButtonIndex"));
+            if (cancelIdx >= 0 && idx == cancelIdx) {
+                WXLog(BJCStr("actionSheet cancel hit (idx=%lld == cancelButtonIndex), skip"), idx);
+                return;
+            }
+        } else if (idx == 0) {
+            WXLog(BJCStr("actionSheet cancel hit (idx=0 == cancelButtonTitle position), skip"));
+            return;
+        }
         for (int i = 0; i < 4; i++) {
             if (WXASIdx[i] == idx) {
                 // i<=2（统计/AI/聊天记录）需要会话上下文；i==3=设置页无需
@@ -1342,19 +1360,17 @@ static void WXShowPKCMenu(void) {
         WXASIdx[1] = ((long long(*)(id, SEL, id))objc_msgSend)(sheet, sel_registerName("addButtonWithTitle:"), BJCStr("🤖 AI 分析"));
         WXASIdx[2] = ((long long(*)(id, SEL, id))objc_msgSend)(sheet, sel_registerName("addButtonWithTitle:"), BJCStr("💬 聊天记录"));
         WXASIdx[3] = ((long long(*)(id, SEL, id))objc_msgSend)(sheet, sel_registerName("addButtonWithTitle:"), BJCStr("⚙️ 设置"));
-        // 必须显式 show，WCActionSheet 不会在 init 后自动弹出（pkc 同款）。无 block/纯 msgSend。
-        if ([sheet respondsToSelector:@selector(show)]) {
+        // 必须显式 show，WCActionSheet 不会在 init 后自动弹出（pkc 同款）。
+        // 微信 WCActionSheet 是 UIWindow 子类，class-dump 头文件仅有 - (void)showInView:(id)arg1;
+        // 故优先 showInView: 传 keyWindow（pkc 同款定位锚点），不再先试 show（UIWindow 不响应）。
+        UIWindow *kw = [UIApplication sharedApplication].keyWindow;
+        if (!kw && [[UIApplication sharedApplication].windows count]) kw = [UIApplication sharedApplication].windows[0];
+        if (kw && [sheet respondsToSelector:@selector(showInView:)]) {
+            ((void(*)(id, SEL, id))objc_msgSend)(sheet, sel_registerName("showInView:"), kw);
+        } else if ([sheet respondsToSelector:@selector(show)]) {
             ((void(*)(id, SEL))objc_msgSend)(sheet, sel_registerName("show"));
         } else {
-            UIWindow *kw = [UIApplication sharedApplication].keyWindow;
-            if (!kw && [[UIApplication sharedApplication].windows count]) kw = [UIApplication sharedApplication].windows[0];
-            if (kw && [sheet respondsToSelector:@selector(showInView:)]) {
-                ((void(*)(id, SEL, id))objc_msgSend)(sheet, sel_registerName("showInView:"), kw);
-            } else if (kw && [sheet respondsToSelector:@selector(showInWindow:)]) {
-                ((void(*)(id, SEL, id))objc_msgSend)(sheet, sel_registerName("showInWindow:"), kw);
-            } else {
-                WXLog(BJCStr("FATAL: WCActionSheet 无可用 show 方法，菜单无法弹出"));
-            }
+            WXLog(BJCStr("FATAL: WCActionSheet 无可用 show 方法，菜单无法弹出"));
         }
         WXPageOpen = YES;
         WXLog(BJCStr("pkc menu shown via WCActionSheet, sess=%@ idx=%lld/%lld/%lld/%lld"),
